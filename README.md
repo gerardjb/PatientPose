@@ -17,11 +17,11 @@ git clone https://github.com/gerardjb/PatientPose
   * Note that as of this writing (20251103), mediapipe does not support pyhton > 3.12
   * Finally, use pip to install the project using either a system install:
   ```bash
-  pip install . [test]
+  pip install .[test]
   ```
   * or a local install if you'd like to make edits to the codebase with:
   ```bash
-  pip install -e . [test]
+  pip install -e .[test]
   ```
 - In each of the pip installs, I've included the optional test suite which includes a pytest unit test - once the install is done, you can immedialtely use pytest to make sure everything is running properly as:
 ```bash
