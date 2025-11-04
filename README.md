@@ -5,9 +5,10 @@
 ```bash
 cd path\to\your\preferred\installation\location
 ```
-- Once there, use git to clone the project to your preferred location:
+- Once there, use git to clone the project to your preferred location, then cd into the project root:
 ```bash
 git clone https://github.com/gerardjb/PatientPose
+cd PatientPose
 ```
   * Next, make a dedicated environment for the project with calls similar to:
   ```bash
