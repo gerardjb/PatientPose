@@ -39,6 +39,10 @@ python the_script_you_want.py
 ```
   * For example, the sample_patient_processing.py will (barring future deprecation which will be a TODO here) create a de-identified version of the input video (removal of features near all detected faces) and a csv that captures the keypoints across the pose and hand landmark detector models.
   * All such files will be populated to the "results" subdirectory of the project root for further inspection if desired.
+- For now, you can test a local file using the same flags as in the previous version, such as:
+```bash
+python sample_patient_processing.py --filename "your_file.extension"
+```
 ## Updating the version of the repo on your local machine
 Git allows you to update to the latest version of the codebase as long as you're in the project root as:
 ```bash
