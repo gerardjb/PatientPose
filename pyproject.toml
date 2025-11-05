@@ -23,7 +23,8 @@ dependencies = [
     "pandas",
     "numpy",
     "opencv-python",    
-    "matplotlib"
+    "matplotlib",
+    "FreeSimpleGUI"
 ]
 
 # Optional dependencies, grouped by purpose (e.g., testing, development)

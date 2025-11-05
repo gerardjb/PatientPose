@@ -44,6 +44,14 @@ python the_script_you_want.py
 ```bash
 python sample_patient_processing.py --filename "your_file.extension"
 ```
+- A labeling GUI for batching metadata entry lives at `scripts/video_labeling_gui.py`. It relies on the community-maintained `FreeSimpleGUI` package bundled with the project dependencies. Launch it from the `scripts` directory with:
+```bash
+python video_labeling_gui.py
+```
+  * On first launch, point the GUI at the folder containing the patient videos you want to label; the file list refreshes automatically when you change folders.
+  * The form lets you enter the patient ID, pick a standardized exam type from the built-in recipes, adjust tags/notes, and apply the metadata to one or many selected videos at once. The latest values are stored in `results/labeling_state.json`, and `Undo` lets you revert the most recent save if needed.
+  * Use `Process selected` to run the full de-identification pipeline on the highlighted clips. Outputs overwrite any prior runs and land in `results/OutputVideos/` and `results/OutputCSVs/`. Missing model files or processing errors are reported inline.
+  * When you're ready to export the current batch of labels, click `Export all` to write a timestamped JSON file in `results/label_exports/`.
 ## Updating the version of the repo on your local machine
 Git allows you to update to the latest version of the codebase as long as you're in the project root as:
 ```bash

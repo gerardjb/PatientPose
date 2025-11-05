@@ -1,0 +1,42 @@
+{
+  "gait_assessment": {
+    "label": "Gait Assessment",
+    "description": "Patient walking to assess gait and bradykinesia.",
+    "tags": [
+      "gait",
+      "bradykinesia",
+      "mobility"
+    ],
+    "checklist": [
+      "Include whether assistive devices are present.",
+      "Note observed freezing episodes or hesitation.",
+      "Capture stride length / symmetry observations."
+    ]
+  },
+  "finger_tapping": {
+    "label": "Finger Tapping",
+    "description": "Finger tapping task focusing on decrement and hesitations.",
+    "tags": [
+      "bradykinesia",
+      "upper_extremity"
+    ],
+    "checklist": [
+      "Left, right, or bilateral task noted.",
+      "Decrement severity scored or described.",
+      "Any dyskinesias or tremor co-occurring."
+    ]
+  },
+  "rest_tremor": {
+    "label": "Rest Tremor",
+    "description": "Assessment of rest tremor at rest and with distraction.",
+    "tags": [
+      "tremor",
+      "upper_extremity"
+    ],
+    "checklist": [
+      "Specify body side(s) involved.",
+      "Describe amplitude and constancy.",
+      "Mention distraction maneuver results."
+    ]
+  }
+}
