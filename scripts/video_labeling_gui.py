@@ -466,10 +466,20 @@ def process_videos_batch(video_paths: List[str]) -> Dict[str, Any]:
     for path_str in video_paths:
         video_path = Path(path_str)
         try:
-            rotation_code = determine_rotation_code(
-                video_path, pose_model_path, rotate_flag=False, auto_orient=True
+            rotation_code, pose_focus_hint = determine_rotation_code(
+                video_path,
+                pose_model_path,
+                rotate_flag=False,
+                auto_orient=True,
+                return_details=True,
             )
-            process_video(video_path, hand_model_path, pose_model_path, rotation_code)
+            process_video(
+                video_path,
+                hand_model_path,
+                pose_model_path,
+                rotation_code,
+                pose_focus_hint=pose_focus_hint,
+            )
             output_video = VIDEO_DIR / f"deidentified_{video_path.stem}.avi"
             output_csv = CSV_DIR / f"landmarks_{video_path.stem}.csv"
             success_count += 1

@@ -10,8 +10,10 @@ from typing import Callable, Dict, Iterable, List, Sequence
 import cv2
 import mediapipe as mp
 import numpy as np
+from mediapipe.framework.formats import landmark_pb2
 
 from .frame_sampling import FrameSample, FrameSampler, FrameSamplerConfig
+from .pose_focus import PoseFocusHint, bbox_from_landmarks
 from .pose_quality import PoseQuality, PoseQualityScorer, PoseQualityScorerConfig
 
 BaseOptions = mp.tasks.BaseOptions
@@ -33,6 +35,7 @@ class PoseObservation:
     contrast: float
     motion_score: float
     source: str
+    landmarks: List[landmark_pb2.NormalizedLandmark] | None
 
 
 @dataclass
@@ -43,6 +46,7 @@ class OrientationDecision:
     reason: str
     observations: List[PoseObservation] = field(default_factory=list)
     debug_entries: List[dict] = field(default_factory=list)
+    focus_hint: PoseFocusHint | None = None
 
 
 class TemporalAnchorBuffer:
@@ -165,18 +169,22 @@ class OrientationAnalyzer:
             cap.release()
 
         if anchor_buffer.anchor:
+            rotation_code = anchor_buffer.anchor.rotation_code
             decision = OrientationDecision(
-                rotation_code=anchor_buffer.anchor.rotation_code,
+                rotation_code=rotation_code,
                 reason="anchor",
                 observations=all_observations,
                 debug_entries=debug_entries,
+                focus_hint=self._derive_focus_hint(rotation_code, all_observations),
             )
         elif best_observation:
+            rotation_code = best_observation.rotation_code
             decision = OrientationDecision(
-                rotation_code=best_observation.rotation_code,
+                rotation_code=rotation_code,
                 reason="best-score",
                 observations=all_observations,
                 debug_entries=debug_entries,
+                focus_hint=self._derive_focus_hint(rotation_code, all_observations),
             )
         else:
             decision = OrientationDecision(
@@ -184,6 +192,7 @@ class OrientationAnalyzer:
                 reason="no-pose",
                 observations=all_observations,
                 debug_entries=debug_entries,
+                focus_hint=None,
             )
 
         self._write_debug_payload(decision, sampler, video_path)
@@ -237,6 +246,7 @@ class OrientationAnalyzer:
                 contrast=sample.contrast,
                 motion_score=sample.motion_score,
                 source=source,
+                landmarks=list(result.pose_landmarks[0]),
             )
             observations.append(observation)
         return observations
@@ -323,6 +333,14 @@ class OrientationAnalyzer:
             "decision": {
                 "rotation_code": decision.rotation_code,
                 "reason": decision.reason,
+                "focus_hint": {
+                    "frame_index": decision.focus_hint.frame_index,
+                    "rotation_code": decision.focus_hint.rotation_code,
+                    "bbox": decision.focus_hint.bbox,
+                    "score": decision.focus_hint.score,
+                }
+                if decision.focus_hint
+                else None,
             },
             "quick_rejects": getattr(sampler, "quick_rejects", 0),
             "observations": decision.debug_entries,
@@ -340,11 +358,13 @@ class OrientationAnalyzer:
         sampler: FrameSampler,
         video_path: Path,
     ) -> OrientationDecision:
+        focus_hint = self._derive_focus_hint(vote[0], observations)
         decision = OrientationDecision(
             rotation_code=vote[0],
             reason=f"vote:{vote[1]:.2f}",
             observations=observations,
             debug_entries=debug_entries,
+            focus_hint=focus_hint,
         )
         self._write_debug_payload(decision, sampler, video_path)
         return decision
@@ -371,6 +391,25 @@ class OrientationAnalyzer:
             running_mode=VisionRunningMode.IMAGE,
         )
         return PoseLandmarker.create_from_options(options)
+
+    def _derive_focus_hint(
+        self, rotation_code: int | None, observations: List[PoseObservation]
+    ) -> PoseFocusHint | None:
+        if rotation_code is None:
+            return None
+        candidates = [
+            obs for obs in observations if obs.rotation_code == rotation_code and obs.landmarks
+        ]
+        if not candidates:
+            return None
+        best = min(candidates, key=lambda obs: obs.quality.score)
+        bbox = bbox_from_landmarks(best.landmarks)
+        return PoseFocusHint(
+            frame_index=best.frame_index,
+            rotation_code=rotation_code,
+            bbox=bbox,
+            score=best.quality.score,
+        )
 
 
 __all__ = [

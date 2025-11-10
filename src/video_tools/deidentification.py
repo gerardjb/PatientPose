@@ -33,8 +33,10 @@ FACE_LANDMARK_INDICES: Sequence[int] = [
     PoseLandmark.RIGHT_EYE_OUTER.value,
     PoseLandmark.MOUTH_LEFT.value,
     PoseLandmark.MOUTH_RIGHT.value,
-    PoseLandmark.LEFT_EAR.value,
-    PoseLandmark.RIGHT_EAR.value,
+]
+SHOULDER_LANDMARK_INDICES: Sequence[int] = [
+    PoseLandmark.LEFT_SHOULDER.value,
+    PoseLandmark.RIGHT_SHOULDER.value,
 ]
 
 POSE_MATCH_DISTANCE_FACTOR = 0.18  # fraction of max dimension used for pose/det match
@@ -43,6 +45,12 @@ YUNET_NMS_THRESHOLD = 0.3
 YUNET_MODEL_FILENAME = "face_detection_yunet_2023mar.onnx"
 MULTISCALE_FACTORS: Tuple[float, ...] = (1.5, 2.0)
 MULTISCALE_IOU_THRESHOLD = 0.35
+FACE_PADDING_SCALE = 0.45
+MIN_FACE_WIDTH_PX = 35
+MIN_FACE_HEIGHT_PX = 35
+FALLBACK_HEAD_WIDTH_SCALE = 0.45
+FALLBACK_HEAD_HEIGHT_SCALE = 0.65
+FALLBACK_HEAD_VERTICAL_OFFSET = 0.25
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 MODEL_DIR = BASE_DIR / "models"
@@ -62,6 +70,53 @@ def _collect_landmark_coords(
         lm = landmarks[idx]
         coords.append((lm.x, lm.y, lm.z))
     return coords
+
+
+def _get_landmark(
+    landmarks: Sequence[landmark_pb2.NormalizedLandmark], index: int
+) -> Optional[landmark_pb2.NormalizedLandmark]:
+    if index >= len(landmarks):
+        return None
+    return landmarks[index]
+
+
+def _eye_span_pixels(
+    landmarks: Sequence[landmark_pb2.NormalizedLandmark],
+    frame_width: int,
+) -> float:
+    left_eye = _get_landmark(landmarks, PoseLandmark.LEFT_EYE_OUTER.value)
+    right_eye = _get_landmark(landmarks, PoseLandmark.RIGHT_EYE_OUTER.value)
+    if not left_eye or not right_eye:
+        return 0.0
+    return abs(right_eye.x - left_eye.x) * frame_width
+
+
+def _fallback_head_bounds(
+    pose_landmarks: Sequence[landmark_pb2.NormalizedLandmark],
+    frame_shape: Tuple[int, int, int],
+) -> Tuple[int, int, int, int] | None:
+    shoulders = _collect_landmark_coords(pose_landmarks, SHOULDER_LANDMARK_INDICES)
+    if len(shoulders) < 2:
+        return None
+    height, width, _ = frame_shape
+    (left_x, left_y, _), (right_x, right_y, _) = shoulders
+    shoulder_width = abs(right_x - left_x) * width
+    if shoulder_width <= 0:
+        return None
+
+    center_x = ((left_x + right_x) * 0.5) * width
+    base_y = min(left_y, right_y) * height
+    head_width = max(MIN_FACE_WIDTH_PX, shoulder_width * FALLBACK_HEAD_WIDTH_SCALE)
+    head_height = max(MIN_FACE_HEIGHT_PX, shoulder_width * FALLBACK_HEAD_HEIGHT_SCALE)
+    center_y = base_y - shoulder_width * FALLBACK_HEAD_VERTICAL_OFFSET
+
+    xmin = int(max(0, center_x - head_width * 0.5))
+    xmax = int(min(width, center_x + head_width * 0.5))
+    ymin = int(max(0, center_y - head_height * 0.6))
+    ymax = int(min(height, center_y + head_height * 0.4))
+    if xmin >= xmax or ymin >= ymax:
+        return None
+    return xmin, ymin, xmax, ymax
 
 
 def _get_yunet_detector(frame_shape: Tuple[int, int, int]) -> cv2.FaceDetectorYN:
@@ -208,7 +263,7 @@ def _pose_face_bounds(
     """
     coords = _collect_landmark_coords(pose_landmarks, FACE_LANDMARK_INDICES)
     if not coords:
-        return None
+        return _fallback_head_bounds(pose_landmarks, frame_shape)
 
     height, width, _ = frame_shape
     xs = [pt[0] * width for pt in coords]
@@ -216,13 +271,20 @@ def _pose_face_bounds(
     zs = [pt[2] * width for pt in coords]  # MediaPipe z is normalized to image width
 
     depth_span = (max(zs) - min(zs)) if zs else 0.0
-    pad = max(depth_padding_px, depth_span * 0.6)
+    eye_pad = _eye_span_pixels(pose_landmarks, width) * FACE_PADDING_SCALE
+    pad = max(depth_padding_px, depth_span * 0.4, eye_pad)
 
     xmin = int(max(0, min(xs) - pad))
     xmax = int(min(width, max(xs) + pad))
     ymin = int(max(0, min(ys) - pad))
     ymax = int(min(height, max(ys) + pad))
 
+    width_px = xmax - xmin
+    height_px = ymax - ymin
+    if width_px < MIN_FACE_WIDTH_PX or height_px < MIN_FACE_HEIGHT_PX:
+        fallback = _fallback_head_bounds(pose_landmarks, frame_shape)
+        if fallback is not None:
+            return fallback
     if xmin >= xmax or ymin >= ymax:
         return None
     return xmin, ymin, xmax, ymax
@@ -337,6 +399,7 @@ def blur_face_with_pose(
         # Pose landmarks already give us the per-person regions; skip YuNet for this frame.
         masks.extend(face["bbox"] for face in pose_faces)
     else:
+        print("No pose landmarks; running YuNet face detector.")
         yunet_detections = _detect_faces_yunet(frame_rgb)
         if not yunet_detections:
             yunet_detections = _detect_faces_multiscale(frame_rgb)

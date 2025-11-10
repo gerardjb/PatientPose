@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import cv2
+from mediapipe.framework.formats import landmark_pb2
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT_DIR.parent / "src"
@@ -151,6 +152,10 @@ def test_orientation_analyzer_uses_anchor_neighborhood(monkeypatch, tmp_path) ->
             confidence_sum=25.0,
             nose_above_shoulders=True,
         )
+        landmarks = [
+            landmark_pb2.NormalizedLandmark(x=0.4, y=0.4, visibility=0.9),
+            landmark_pb2.NormalizedLandmark(x=0.6, y=0.6, visibility=0.9),
+        ]
         observation = PoseObservation(
             frame_index=sample.frame_index,
             timestamp_ms=sample.timestamp_ms,
@@ -161,6 +166,7 @@ def test_orientation_analyzer_uses_anchor_neighborhood(monkeypatch, tmp_path) ->
             contrast=sample.contrast,
             motion_score=sample.motion_score,
             source="original",
+            landmarks=landmarks,
         )
         return [observation]
 
@@ -178,3 +184,6 @@ def test_orientation_analyzer_uses_anchor_neighborhood(monkeypatch, tmp_path) ->
 
     assert decision.rotation_code == cv2.ROTATE_90_CLOCKWISE
     assert decision.reason.startswith("vote")
+    assert decision.focus_hint is not None
+    assert decision.focus_hint.rotation_code == cv2.ROTATE_90_CLOCKWISE
+    assert decision.focus_hint.bbox[0] <= decision.focus_hint.bbox[2]

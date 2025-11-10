@@ -14,6 +14,7 @@ os.environ.setdefault("MEDIAPIPE_SKIP_AUDIO", "1")
 import mediapipe as mp
 
 from .orientation_focus import OrientationAnalyzer, OrientationAnalyzerConfig
+from .pose_focus import PoseFocusHint
 from .pose_quality import PoseQuality, PoseQualityScorer
 
 BaseOptions = mp.tasks.BaseOptions
@@ -107,7 +108,8 @@ def determine_rotation_code(
     orientation_max_scan: int | None = None,
     orientation_debug: bool = False,
     orientation_debug_dir: Path | None = None,
-) -> int | None:
+    return_details: bool = False,
+) -> int | None | tuple[int | None, PoseFocusHint | None]:
     """
     Determine the rotation code to use for processing a video.
     Respects manual overrides and optionally infers rotation from the first frame.
@@ -116,10 +118,12 @@ def determine_rotation_code(
         if auto_orient:
             print("Manual rotation flag overrides auto-orientation request.")
         print("Using manual 90° clockwise rotation.")
+        if return_details:
+            return cv2.ROTATE_90_CLOCKWISE, None
         return cv2.ROTATE_90_CLOCKWISE
 
     if not auto_orient:
-        return None
+        return (None, None) if return_details else None
 
     max_scan = orientation_max_scan or ORIENTATION_SAMPLE_LIMIT
     analyzer_config = OrientationAnalyzerConfig(
@@ -136,7 +140,7 @@ def determine_rotation_code(
     if decision.rotation_code is None:
         print("Auto-orientation could not determine rotation after scanning frames; defaulting to no rotation.")
         _maybe_report_debug_path(video_path, orientation_debug, orientation_debug_dir)
-        return None
+        return (None, decision.focus_hint) if return_details else None
 
     label = _rotation_label(decision.rotation_code)
     reason = decision.reason
@@ -150,6 +154,8 @@ def determine_rotation_code(
         print(f"Auto-orientation selected {label} without pose confidence.")
 
     _maybe_report_debug_path(video_path, orientation_debug, orientation_debug_dir)
+    if return_details:
+        return decision.rotation_code, decision.focus_hint
     return decision.rotation_code
 
 

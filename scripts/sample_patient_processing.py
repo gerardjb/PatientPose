@@ -14,6 +14,13 @@ import pandas as pd
 from analysis_tools.landmark_utils import extract_landmarks_for_frame
 from image_overlays import draw_pose_landmarks
 from video_tools import blur_face_with_pose, determine_rotation_code, rotate_frame
+from video_tools.pose_focus import (
+    PoseFocusHint,
+    PoseFocusTracker,
+    crop_frame_from_bbox,
+    remap_landmarks_from_crop,
+)
+from video_tools.pose_quality import PoseQualityScorer
 
 # --- Constants ---
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -39,7 +46,11 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 
 
 def process_video(
-    video_path: Path, hand_model_path: Path, pose_model_path: Path, rotation_code: int | None
+    video_path: Path,
+    hand_model_path: Path,
+    pose_model_path: Path,
+    rotation_code: int | None,
+    pose_focus_hint: PoseFocusHint | None = None,
 ) -> None:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -66,17 +77,24 @@ def process_video(
         running_mode=VisionRunningMode.VIDEO,
         num_hands=2,
     )
-    pose_options = PoseLandmarkerOptions(
+    pose_video_options = PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=str(pose_model_path)),
         running_mode=VisionRunningMode.VIDEO,
+    )
+    pose_image_options = PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=str(pose_model_path)),
+        running_mode=VisionRunningMode.IMAGE,
     )
 
     frame_index = 0
     all_landmarks: List[dict] = []
 
+    focus_tracker = PoseFocusTracker(pose_focus_hint) if pose_focus_hint else None
+    pose_quality_scorer = PoseQualityScorer()
+
     with HandLandmarker.create_from_options(hand_options) as handmarker, PoseLandmarker.create_from_options(
-        pose_options
-    ) as posemarker:
+        pose_video_options
+    ) as posemarker, PoseLandmarker.create_from_options(pose_image_options) as posemarker_image:
         print("Hand and pose landmarkers initialized.")
 
         while cap.isOpened():
@@ -96,6 +114,29 @@ def process_video(
 
             hand_result = handmarker.detect_for_video(mp_frame, timestamp_ms)
             pose_result = posemarker.detect_for_video(mp_frame, timestamp_ms)
+            pose_quality = (
+                pose_quality_scorer.score(pose_result) if pose_result.pose_landmarks else None
+            )
+
+            if (not pose_result.pose_landmarks or not (pose_quality and pose_quality.is_good)) and focus_tracker:
+                bbox = focus_tracker.current_bbox()
+                if bbox:
+                    crop_data = crop_frame_from_bbox(frame_rgb, bbox)
+                    if crop_data:
+                        crop_rgb, transform = crop_data
+                        crop_rgb = np.ascontiguousarray(crop_rgb)
+                        mp_crop = mp.Image(image_format=mp.ImageFormat.SRGB, data=crop_rgb)
+                        crop_result = posemarker_image.detect(mp_crop)
+                        if crop_result.pose_landmarks:
+                            remap_landmarks_from_crop(crop_result.pose_landmarks[0], transform)
+                            pose_result = crop_result
+                            pose_quality = pose_quality_scorer.score(pose_result)
+
+            if focus_tracker:
+                if pose_result.pose_landmarks:
+                    focus_tracker.register_success(pose_result.pose_landmarks[0])
+                else:
+                    focus_tracker.register_failure()
 
             frame_landmarks = extract_landmarks_for_frame(frame_index, timestamp_ms, hand_result, pose_result)
             all_landmarks.extend(frame_landmarks)
@@ -184,7 +225,7 @@ def main() -> None:
     if not video_path.is_file():
         raise FileNotFoundError(f"Video file not found at {video_path}")
 
-    rotation_code = determine_rotation_code(
+    rotation_code, pose_focus_hint = determine_rotation_code(
         video_path,
         pose_model_path,
         args.rotate,
@@ -192,8 +233,9 @@ def main() -> None:
         orientation_max_scan=args.orientation_max_scan,
         orientation_debug=args.orientation_debug,
         orientation_debug_dir=OUTPUT_DIR / "orientation_debug",
+        return_details=True,
     )
-    process_video(video_path, hand_model_path, pose_model_path, rotation_code)
+    process_video(video_path, hand_model_path, pose_model_path, rotation_code, pose_focus_hint=pose_focus_hint)
 
 
 if __name__ == "__main__":
