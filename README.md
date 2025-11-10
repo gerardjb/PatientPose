@@ -44,6 +44,23 @@ python the_script_you_want.py
 ```bash
 python sample_patient_processing.py --filename "your_file.extension"
 ```
+  * If you'd like the auto-orientation stage to log every frame it inspected (including the per-rotation scores/landmarks), add the debug switches and point them to an output folder:
+  ```bash
+  python sample_patient_processing.py \
+    --filename "/path/to/video.mp4" \
+    --orientation-debug \
+    --orientation-max-scan 250
+  ```
+    - Each run creates a JSON file in `results/orientation_debug/` (one per input) summarizing the selected rotation, the sampled frames, and the focus hint that seeds the ROI tracker.
+  * To inspect the exact frames/rotations the pose-quality heuristics consider “good” or “bad”, use the helper script `debug_pose_quality_frames.py`:
+  ```bash
+  python debug_pose_quality_frames.py \
+    --video sample_data/PXL_20251106_173128817_identifiable_and_rotated.mp4 \
+    --pose-model models/pose_landmarker.task \
+    --output-video results/pose_quality_debug.mp4
+  ```
+    - The CLI prints the per-rotation quality breakdown for the preset “bad” (0/10/20/30) and “good” (75/85/95) frames found in `sample_data\PXL_20251106_173128817_identifiable_and_rotated.mp4`, while the optional `results/pose_quality_debug.mp4` captures the annotated crops (frame number, rotation label, score, landmarks) for the test frames.
+      - Note*: parameters are currently hard-coded within script itself, but I might update this as a TODO if this ends up being a persistent place driving issues.
 - A labeling GUI for batching metadata entry lives at `scripts/video_labeling_gui.py`. It relies on the community-maintained `FreeSimpleGUI` package bundled with the project dependencies. Launch it from the `scripts` directory with:
 ```bash
 python video_labeling_gui.py
