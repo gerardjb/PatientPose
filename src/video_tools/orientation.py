@@ -3,19 +3,23 @@
 Utilities for inferring the upright orientation of video frames.
 """
 from pathlib import Path
-import math
-from typing import List
+from typing import List, Tuple
+import os
 
 import cv2
-import mediapipe as mp
 import numpy as np
+
+os.environ.setdefault("MEDIAPIPE_SKIP_AUDIO", "1")
+
+import mediapipe as mp
+
+from .orientation_focus import OrientationAnalyzer, OrientationAnalyzerConfig
+from .pose_quality import PoseQuality, PoseQualityScorer
 
 BaseOptions = mp.tasks.BaseOptions
 PoseLandmarker = mp.tasks.vision.PoseLandmarker
 PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
-PoseLandmarkerResult = mp.tasks.vision.PoseLandmarkerResult
-PoseLandmark = mp.solutions.pose.PoseLandmark
 
 ORIENTATION_ROTATIONS: List[int | None] = [
     None,
@@ -23,6 +27,8 @@ ORIENTATION_ROTATIONS: List[int | None] = [
     cv2.ROTATE_90_COUNTERCLOCKWISE,
     cv2.ROTATE_180,
 ]
+
+ORIENTATION_SAMPLE_LIMIT = 150  # frames to scan before giving up
 
 
 def rotate_frame(frame: np.ndarray, rotation_code: int | None) -> np.ndarray:
@@ -32,56 +38,55 @@ def rotate_frame(frame: np.ndarray, rotation_code: int | None) -> np.ndarray:
     return cv2.rotate(frame, rotation_code)
 
 
-def _orientation_score(pose_result: PoseLandmarkerResult) -> float:
-    """Calculate a score representing how upright the pose appears."""
-    if not pose_result.pose_landmarks:
-        return float("inf")
-
-    landmarks = pose_result.pose_landmarks[0]
-    try:
-        left_shoulder = landmarks[PoseLandmark.LEFT_SHOULDER.value]
-        right_shoulder = landmarks[PoseLandmark.RIGHT_SHOULDER.value]
-        nose = landmarks[PoseLandmark.NOSE.value]
-    except IndexError:
-        return float("inf")
-
-    dx = right_shoulder.x - left_shoulder.x
-    dy = right_shoulder.y - left_shoulder.y
-    angle_deg = math.degrees(math.atan2(dy, dx))
-    angle_score = min(abs(angle_deg), abs(abs(angle_deg) - 180.0))
-
-    shoulder_mid_y = (left_shoulder.y + right_shoulder.y) * 0.5
-    nose_penalty = 0.0 if nose.y < shoulder_mid_y else 90.0
-
-    return angle_score + nose_penalty
-
-
-def infer_orientation_from_frame(frame_bgr: np.ndarray, pose_model_path: Path) -> int | None:
+def infer_orientation_from_frame(frame_bgr: np.ndarray, pose_model_path: Path) -> Tuple[int | None, str]:
     """
     Infer the upright orientation for a single frame using pose landmarks.
-    Returns the rotation code that best aligns the person upright.
+
+    Returns a tuple of (rotation_code, source_label) where source_label is one of:
+        - "pose-original": pose detection succeeded on the original frame.
+        - "pose-upscaled": detection only succeeded after a 2x upscale fallback.
+        - "none": no pose detected even after fallback.
     """
+    if frame_bgr is None or frame_bgr.size == 0:
+        return None, "none"
+
     options = PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=str(pose_model_path)),
         running_mode=VisionRunningMode.IMAGE,
     )
+    scorer = PoseQualityScorer()
     with PoseLandmarker.create_from_options(options) as pose_marker:
-        best_rotation = None
-        best_score = float("inf")
+        rotation, quality = _best_rotation_for_frame(pose_marker, frame_bgr, scorer)
+        if rotation is not None and quality is not None:
+            return rotation, "pose-original"
 
-        for rotation_code in ORIENTATION_ROTATIONS:
-            rotated = rotate_frame(frame_bgr, rotation_code)
-            frame_rgb = cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-            result = pose_marker.detect(mp_image)
-            score = _orientation_score(result)
-            if score < best_score:
-                best_score = score
-                best_rotation = rotation_code
+        upscaled = cv2.resize(frame_bgr, dsize=None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
+        rotation_up, quality_up = _best_rotation_for_frame(pose_marker, upscaled, scorer)
+        if rotation_up is not None and quality_up is not None:
+            return rotation_up, "pose-upscaled"
 
-    if best_score == float("inf"):
-        return None
-    return best_rotation
+    return None, "none"
+
+
+def _best_rotation_for_frame(
+    pose_marker: PoseLandmarker, frame_bgr: np.ndarray, scorer: PoseQualityScorer
+) -> Tuple[int | None, PoseQuality | None]:
+    best_rotation = None
+    best_quality = None
+    for rotation_code in ORIENTATION_ROTATIONS:
+        rotated = rotate_frame(frame_bgr, rotation_code)
+        frame_rgb = cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+        result = pose_marker.detect(mp_image)
+        if not result.pose_landmarks:
+            continue
+        quality = scorer.score(result)
+        if quality is None:
+            continue
+        if best_quality is None or quality.score < best_quality.score:
+            best_quality = quality
+            best_rotation = rotation_code
+    return best_rotation, best_quality
 
 
 def _rotation_label(rotation_code: int | None) -> str:
@@ -95,7 +100,13 @@ def _rotation_label(rotation_code: int | None) -> str:
 
 
 def determine_rotation_code(
-    video_path: Path, pose_model_path: Path, rotate_flag: bool, auto_orient: bool
+    video_path: Path,
+    pose_model_path: Path,
+    rotate_flag: bool,
+    auto_orient: bool,
+    orientation_max_scan: int | None = None,
+    orientation_debug: bool = False,
+    orientation_debug_dir: Path | None = None,
 ) -> int | None:
     """
     Determine the rotation code to use for processing a video.
@@ -110,20 +121,44 @@ def determine_rotation_code(
     if not auto_orient:
         return None
 
-    cap = cv2.VideoCapture(str(video_path))
-    ret, first_frame = cap.read()
-    cap.release()
-    if not ret:
-        print("Warning: Unable to read first frame for auto-orientation; defaulting to no rotation.")
+    max_scan = orientation_max_scan or ORIENTATION_SAMPLE_LIMIT
+    analyzer_config = OrientationAnalyzerConfig(
+        rotation_codes=ORIENTATION_ROTATIONS,
+        max_scan_frames=max_scan,
+        primary_stride=15,
+        anchor_radius=3,
+        debug_enabled=orientation_debug,
+        debug_output_dir=orientation_debug_dir,
+    )
+    analyzer = OrientationAnalyzer(analyzer_config)
+    decision = analyzer.analyze(video_path, pose_model_path)
+
+    if decision.rotation_code is None:
+        print("Auto-orientation could not determine rotation after scanning frames; defaulting to no rotation.")
+        _maybe_report_debug_path(video_path, orientation_debug, orientation_debug_dir)
         return None
 
-    inferred = infer_orientation_from_frame(first_frame, pose_model_path)
-    if inferred is None:
-        print("Auto-orientation could not determine rotation; defaulting to no rotation.")
-        return None
+    label = _rotation_label(decision.rotation_code)
+    reason = decision.reason
+    if reason.startswith("vote:"):
+        print(f"Auto-orientation selected {label} after pose voting ({reason}).")
+    elif reason == "anchor":
+        print(f"Auto-orientation selected {label} anchored on the first good pose instance.")
+    elif reason == "best-score":
+        print(f"Auto-orientation selected {label} based on the best scored pose.")
+    else:
+        print(f"Auto-orientation selected {label} without pose confidence.")
 
-    print(f"Auto-orientation selected {_rotation_label(inferred)}.")
-    return inferred
+    _maybe_report_debug_path(video_path, orientation_debug, orientation_debug_dir)
+    return decision.rotation_code
+
+
+def _maybe_report_debug_path(video_path: Path, debug_enabled: bool, debug_dir: Path | None) -> None:
+    if not debug_enabled or not debug_dir:
+        return
+    debug_path = debug_dir / f"{video_path.stem}_orientation.json"
+    if debug_path.exists():
+        print(f"Orientation debug saved to {debug_path}")
 
 
 __all__ = [

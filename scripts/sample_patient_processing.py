@@ -1,18 +1,18 @@
 # -*- coding: utf-8 -*-
 import argparse
+import os
 from pathlib import Path
 from typing import List
+
+os.environ.setdefault("MEDIAPIPE_SKIP_AUDIO", "1")
 
 import cv2
 import mediapipe as mp
 import numpy as np
 import pandas as pd
 
-from analysis_tools.landmark_utils import (
-    extract_landmarks_for_frame,
-    INDEX_FINGER_TIP_INDEX,
-    THUMB_TIP_INDEX,
-)
+from analysis_tools.landmark_utils import extract_landmarks_for_frame
+from image_overlays import draw_pose_landmarks
 from video_tools import blur_face_with_pose, determine_rotation_code, rotate_frame
 
 # --- Constants ---
@@ -36,34 +36,6 @@ HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
 PoseLandmarker = mp.tasks.vision.PoseLandmarker
 PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
-
-
-def draw_right_hand_fingertips(
-    frame_rgb: np.ndarray, hand_result: mp.tasks.vision.HandLandmarkerResult
-) -> np.ndarray:
-    """Overlay right-hand index and thumb tips as small white circles."""
-    if not hand_result.hand_landmarks or not hand_result.handedness:
-        return frame_rgb
-
-    annotated = np.copy(frame_rgb)
-    height, width, _ = annotated.shape
-
-    for handedness_list, landmarks in zip(hand_result.handedness, hand_result.hand_landmarks):
-        if not handedness_list:
-            continue
-        if handedness_list[0].category_name.lower() != "right":
-            continue
-
-        for landmark_idx, landmark in enumerate(landmarks):
-            if landmark_idx not in (INDEX_FINGER_TIP_INDEX, THUMB_TIP_INDEX):
-                continue
-
-            cx = int(landmark.x * width)
-            cy = int(landmark.y * height)
-            if 0 <= cx < width and 0 <= cy < height:
-                cv2.circle(annotated, (cx, cy), 3, (255, 255, 255), -1)
-
-    return annotated
 
 
 def process_video(
@@ -129,7 +101,7 @@ def process_video(
             all_landmarks.extend(frame_landmarks)
 
             anonymized_frame = blur_face_with_pose(frame_rgb, pose_result)
-            annotated_frame = draw_right_hand_fingertips(anonymized_frame, hand_result)
+            annotated_frame = draw_pose_landmarks(anonymized_frame, pose_result)
             writer.write(cv2.cvtColor(annotated_frame, cv2.COLOR_RGB2BGR))
 
             frame_index += 1
@@ -178,6 +150,16 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Attempt to infer the upright orientation from the first frame.",
     )
+    parser.add_argument(
+        "--orientation-max-scan",
+        type=int,
+        help="Maximum number of frames to scan while auto-orienting (default 150).",
+    )
+    parser.add_argument(
+        "--orientation-debug",
+        action="store_true",
+        help="Enable verbose orientation diagnostics and JSON summaries.",
+    )
     return parser.parse_args()
 
 
@@ -202,7 +184,15 @@ def main() -> None:
     if not video_path.is_file():
         raise FileNotFoundError(f"Video file not found at {video_path}")
 
-    rotation_code = determine_rotation_code(video_path, pose_model_path, args.rotate, args.auto_orient)
+    rotation_code = determine_rotation_code(
+        video_path,
+        pose_model_path,
+        args.rotate,
+        args.auto_orient,
+        orientation_max_scan=args.orientation_max_scan,
+        orientation_debug=args.orientation_debug,
+        orientation_debug_dir=OUTPUT_DIR / "orientation_debug",
+    )
     process_video(video_path, hand_model_path, pose_model_path, rotation_code)
 
 
