@@ -50,12 +50,13 @@ python video_labeling_gui.py
 ```
   * On first launch, point the GUI at the folder containing the patient videos you want to label; the file list refreshes automatically when you change folders.
   * The form lets you enter the patient ID, pick a standardized exam type from the built-in recipes, adjust tags/notes, and apply the metadata to one or many selected videos at once. The latest values are stored in `results/labeling_state.json`, and `Undo` lets you revert the most recent save if needed.
-  * Use `Process selected` to run the full de-identification pipeline on the highlighted clips. Outputs overwrite any prior runs and land in `results/OutputVideos/` and `results/OutputCSVs/`. Missing model files or processing errors are reported inline.
+  * Use `Process selected` to run the full de-identification pipeline on the highlighted clips. Outputs overwrite any prior runs and land in `results/OutputVideos/` and `results/OutputCSVs/`. Missing model files (e.g., `models/face_detection_yunet_2023mar.onnx` for the YuNet face detector that ships with the repo) or processing errors are reported inline.
   * When you're ready to export the current batch of labels, click `Export all` to write a timestamped JSON file in `results/label_exports/`.
+  * Note: Mediapipe now attempts to load optional audio modules on import, which can hang if the system is missing PortAudio. All scripts set `MEDIAPIPE_SKIP_AUDIO=1` automatically, but if you run custom code be sure to export that environment variable (or install PortAudio) before launching Python.
 ## Updating the version of the repo on your local machine
 Git allows you to update to the latest version of the codebase as long as you're in the project root as:
 ```bash
 git pull
 ```
-- As long as you haven't made any cahnges to the codebase in the version you have on your machine, this should update your version without errors
+- As long as you haven't made any changes to the codebase in the version you have on your machine, this should update your version without errors
 - If it doesn't work...see me, and we'll talk. :)
