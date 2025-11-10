@@ -1,8 +1,28 @@
+import os
 import cv2
 import numpy as np
 import math
+import importlib
+
+os.environ.setdefault("MEDIAPIPE_SKIP_AUDIO", "1")
+
 import mediapipe as mp
-from mediapipe import solutions
+
+try:
+    from mediapipe import solutions as _mp_solutions
+except ModuleNotFoundError:
+    _mp_solutions = None
+
+if _mp_solutions is None:
+    _mp_solutions = getattr(mp, "solutions", None)
+if _mp_solutions is None:
+    try:
+        _mp_solutions = importlib.import_module("mediapipe.python.solutions")
+    except ModuleNotFoundError as exc:
+        raise ImportError("Unable to load mediapipe solutions module") from exc
+
+solutions = _mp_solutions
+
 from mediapipe.framework.formats import landmark_pb2
 """
 Utility functions for MediaPipe landmark processing and visualization.
