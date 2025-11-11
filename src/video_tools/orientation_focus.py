@@ -81,11 +81,14 @@ class OrientationAnalyzerConfig:
 
     rotation_codes: Sequence[int | None]
     max_scan_frames: int = 150
-    primary_stride: int = 15
+    primary_stride: int = 5
     anchor_radius: int = 3
     vote_ratio_threshold: float = 1.6
     min_vote_weight: float = 0.15
     use_upscale_fallback: bool = True
+    good_pose_target: int = 5
+    min_detected_rotations: int = 2
+    min_good_frame_support: int = 2
     debug_enabled: bool = False
     debug_output_dir: Path | None = None
     quality_config: PoseQualityScorerConfig = field(default_factory=PoseQualityScorerConfig)
@@ -119,6 +122,10 @@ class OrientationAnalyzer:
         scorer = PoseQualityScorer(self.config.quality_config)
 
         rotation_votes: Dict[int | None, List[PoseObservation]] = defaultdict(list)
+        good_pose_counts: Dict[int | None, int] = defaultdict(int)
+        good_frame_support: Dict[int | None, set[int]] = defaultdict(set)
+        detections_seen: set[int | None] = set()
+        first_good_observation: Dict[int | None, PoseObservation] = {}
         anchor_buffer = TemporalAnchorBuffer(self.config.anchor_radius)
         processed_frames: set[int] = set()
         all_observations: List[PoseObservation] = []
@@ -135,15 +142,35 @@ class OrientationAnalyzer:
                         continue
                     processed_frames.add(sample.frame_index)
                     sample_observations = self._evaluate_sample(pose_marker, sample, scorer)
-                    all_observations.extend(sample_observations)
-                    self._register_observations(sample_observations, rotation_votes, anchor_buffer)
-                    best_observation = self._pick_best(best_observation, sample_observations)
+                    valid_observations = [
+                        obs for obs in sample_observations if obs.landmarks
+                    ]
+                    detected_rotations = {obs.rotation_code for obs in valid_observations}
+                    if len(detected_rotations) < self.config.min_detected_rotations:
+                        continue
+                    all_observations.extend(valid_observations)
+                    triggered, good_pose_rotation = self._register_observations(
+                        valid_observations,
+                        rotation_votes,
+                        anchor_buffer,
+                        good_pose_counts,
+                        good_frame_support,
+                        first_good_observation,
+                        detections_seen,
+                    )
+                    if triggered:
+                        return self._finalize_decision(
+                            good_pose_rotation,
+                            "good-target",
+                            all_observations,
+                            debug_entries,
+                            sampler,
+                            video_path,
+                            first_good_observation,
+                        )
+                    best_observation = self._pick_best(best_observation, valid_observations)
                     if self.config.debug_enabled:
-                        debug_entries.extend(self._observations_to_debug(sample_observations, sample))
-
-                    vote = self._evaluate_votes(rotation_votes)
-                    if vote:
-                        return self._finalize_decision(vote, all_observations, debug_entries, sampler, video_path)
+                        debug_entries.extend(self._observations_to_debug(valid_observations, sample))
 
                     if anchor_buffer.anchor and anchor_buffer.need_more_neighbors():
                         neighbors = sampler.request_neighbors(anchor_buffer.anchor.frame_index, self.config.anchor_radius)
@@ -157,25 +184,54 @@ class OrientationAnalyzer:
                                 scorer,
                                 prefer_rotation=anchor_buffer.anchor.rotation_code,
                             )
-                            all_observations.extend(neighbor_observations)
-                            self._register_observations(neighbor_observations, rotation_votes, anchor_buffer)
-                            best_observation = self._pick_best(best_observation, neighbor_observations)
+                            valid_neighbor_observations = [
+                                obs for obs in neighbor_observations if obs.landmarks
+                            ]
+                            detected_neighbor_rotations = {obs.rotation_code for obs in valid_neighbor_observations}
+                            if len(detected_neighbor_rotations) < self.config.min_detected_rotations:
+                                continue
+                            all_observations.extend(valid_neighbor_observations)
+                            triggered, good_pose_rotation = self._register_observations(
+                                valid_neighbor_observations,
+                                rotation_votes,
+                                anchor_buffer,
+                                good_pose_counts,
+                                good_frame_support,
+                                first_good_observation,
+                                detections_seen,
+                            )
+                            if triggered:
+                                return self._finalize_decision(
+                                    good_pose_rotation,
+                                    "good-target",
+                                    all_observations,
+                                    debug_entries,
+                                    sampler,
+                                    video_path,
+                                    first_good_observation,
+                                )
+                            best_observation = self._pick_best(best_observation, valid_neighbor_observations)
                             if self.config.debug_enabled:
-                                debug_entries.extend(self._observations_to_debug(neighbor_observations, neighbor))
-                        vote = self._evaluate_votes(rotation_votes)
-                        if vote:
-                            return self._finalize_decision(vote, all_observations, debug_entries, sampler, video_path)
+                                debug_entries.extend(self._observations_to_debug(valid_neighbor_observations, neighbor))
         finally:
             cap.release()
 
-        if anchor_buffer.anchor:
+        if len(detections_seen) < self.config.min_detected_rotations:
+            decision = OrientationDecision(
+                rotation_code=None,
+                reason="insufficient-detections",
+                observations=all_observations,
+                debug_entries=debug_entries,
+                focus_hint=None,
+            )
+        elif anchor_buffer.anchor:
             rotation_code = anchor_buffer.anchor.rotation_code
             decision = OrientationDecision(
                 rotation_code=rotation_code,
                 reason="anchor",
                 observations=all_observations,
                 debug_entries=debug_entries,
-                focus_hint=self._derive_focus_hint(rotation_code, all_observations),
+                focus_hint=self._derive_focus_hint(rotation_code, all_observations, first_good_observation),
             )
         elif best_observation:
             rotation_code = best_observation.rotation_code
@@ -184,7 +240,7 @@ class OrientationAnalyzer:
                 reason="best-score",
                 observations=all_observations,
                 debug_entries=debug_entries,
-                focus_hint=self._derive_focus_hint(rotation_code, all_observations),
+                focus_hint=self._derive_focus_hint(rotation_code, all_observations, first_good_observation),
             )
         else:
             decision = OrientationDecision(
@@ -256,10 +312,34 @@ class OrientationAnalyzer:
         observations: Iterable[PoseObservation],
         rotation_votes: Dict[int | None, List[PoseObservation]],
         anchor_buffer: TemporalAnchorBuffer,
-    ) -> None:
+        good_pose_counts: Dict[int | None, int],
+        good_frame_support: Dict[int | None, set[int]],
+        first_good_observation: Dict[int | None, PoseObservation],
+        detections_seen: set[int | None],
+    ) -> tuple[bool, int | None]:
+        triggered: bool | False = False
+        trigger_rotation: int | None = None
+        detected_rotations = {obs.rotation_code for obs in observations if obs.landmarks}
+        global_detection_update = bool(detected_rotations)
+        if global_detection_update:
+            detections_seen.update(detected_rotations)
+        eligible = len(detected_rotations) >= self.config.min_detected_rotations
         for obs in observations:
             rotation_votes[obs.rotation_code].append(obs)
             anchor_buffer.record(obs)
+            if obs.quality.is_good and eligible:
+                if obs.rotation_code not in first_good_observation:
+                    first_good_observation[obs.rotation_code] = obs
+                good_frame_support[obs.rotation_code].add(obs.frame_index)
+                good_pose_counts[obs.rotation_code] += 1
+                if (
+                    triggered is False
+                    and len(good_frame_support[obs.rotation_code]) >= self.config.min_good_frame_support
+                    and good_pose_counts[obs.rotation_code] >= self.config.good_pose_target
+                ):
+                    triggered = True
+                    trigger_rotation = obs.rotation_code
+        return (triggered, trigger_rotation)
 
     def _evaluate_votes(self, rotation_votes: Dict[int | None, List[PoseObservation]]) -> tuple[int | None, float] | None:
         if not rotation_votes:
@@ -352,16 +432,18 @@ class OrientationAnalyzer:
 
     def _finalize_decision(
         self,
-        vote: tuple[int | None, float],
+        rotation_code: int | None,
+        reason: str,
         observations: List[PoseObservation],
         debug_entries: List[dict],
         sampler: FrameSampler,
         video_path: Path,
+        first_good_observation: Dict[int | None, PoseObservation],
     ) -> OrientationDecision:
-        focus_hint = self._derive_focus_hint(vote[0], observations)
+        focus_hint = self._derive_focus_hint(rotation_code, observations, first_good_observation)
         decision = OrientationDecision(
-            rotation_code=vote[0],
-            reason=f"vote:{vote[1]:.2f}",
+            rotation_code=rotation_code,
+            reason=reason,
             observations=observations,
             debug_entries=debug_entries,
             focus_hint=focus_hint,
@@ -393,10 +475,21 @@ class OrientationAnalyzer:
         return PoseLandmarker.create_from_options(options)
 
     def _derive_focus_hint(
-        self, rotation_code: int | None, observations: List[PoseObservation]
+        self,
+        rotation_code: int | None,
+        observations: List[PoseObservation],
+        first_good_observation: Dict[int | None, PoseObservation],
     ) -> PoseFocusHint | None:
-        if rotation_code is None:
-            return None
+        if rotation_code in first_good_observation:
+            observation = first_good_observation[rotation_code]
+            bbox = bbox_from_landmarks(observation.landmarks) if observation.landmarks else None
+            if bbox:
+                return PoseFocusHint(
+                    frame_index=observation.frame_index,
+                    rotation_code=rotation_code,
+                    bbox=bbox,
+                    score=observation.quality.score,
+                )
         candidates = [
             obs for obs in observations if obs.rotation_code == rotation_code and obs.landmarks
         ]

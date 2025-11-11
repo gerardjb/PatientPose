@@ -108,6 +108,8 @@ def determine_rotation_code(
     orientation_max_scan: int | None = None,
     orientation_debug: bool = False,
     orientation_debug_dir: Path | None = None,
+    orientation_good_target: int | None = None,
+    orientation_min_detections: int | None = None,
     return_details: bool = False,
 ) -> int | None | tuple[int | None, PoseFocusHint | None]:
     """
@@ -133,12 +135,14 @@ def determine_rotation_code(
         anchor_radius=3,
         debug_enabled=orientation_debug,
         debug_output_dir=orientation_debug_dir,
+        good_pose_target=orientation_good_target or 5,
+        min_detected_rotations=orientation_min_detections or 2,
     )
     analyzer = OrientationAnalyzer(analyzer_config)
     decision = analyzer.analyze(video_path, pose_model_path)
 
     if decision.rotation_code is None:
-        print("Auto-orientation could not determine rotation after scanning frames; defaulting to no rotation.")
+        print("Auto-orientation found orientation was correct, landmark hints available") if return_details else print("Auto-Orientation could not resolve orientation, no landmark hints available.")
         _maybe_report_debug_path(video_path, orientation_debug, orientation_debug_dir)
         return (None, decision.focus_hint) if return_details else None
 

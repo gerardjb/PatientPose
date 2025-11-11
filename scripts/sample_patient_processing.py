@@ -201,6 +201,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable verbose orientation diagnostics and JSON summaries.",
     )
+    parser.add_argument(
+        "--orientation-good-target",
+        type=int,
+        help="Number of good pose frames required before locking orientation (default 5).",
+    )
+    parser.add_argument(
+        "--orientation-min-detections",
+        type=int,
+        help="Minimum number of rotations that must detect a pose on a frame for it to count (default 2).",
+    )
     return parser.parse_args()
 
 
@@ -233,6 +243,8 @@ def main() -> None:
         orientation_max_scan=args.orientation_max_scan,
         orientation_debug=args.orientation_debug,
         orientation_debug_dir=OUTPUT_DIR / "orientation_debug",
+        orientation_good_target=args.orientation_good_target,
+        orientation_min_detections=args.orientation_min_detections,
         return_details=True,
     )
     process_video(video_path, hand_model_path, pose_model_path, rotation_code, pose_focus_hint=pose_focus_hint)

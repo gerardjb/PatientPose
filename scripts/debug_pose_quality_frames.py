@@ -74,7 +74,7 @@ def parse_args() -> argparse.Namespace:
         "--bad-indices",
         type=int,
         nargs="+",
-        default=[0, 10, 20, 30],
+        default=[0, 5, 10, 15, 20, 25, 30, 35],
         help="Zero-based indices expected to be low quality.",
     )
     parser.add_argument(
