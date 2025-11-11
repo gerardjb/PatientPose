@@ -44,6 +44,15 @@ python the_script_you_want.py
 ```bash
 python sample_patient_processing.py --filename "your_file.extension"
 ```
+  * Additional options are available if default sampling can't resolve the best orientation:
+  ```bash
+  python sample_patient_processing.py \
+    --filename "/path/to/video.mp4" \
+    --orientation-max-scan 300 \
+    --orientation-good-target 6 \
+    --orientation-min-detections 1
+  ```
+    - `--orientation-good-target` controls how many “good” pose frames (default 5) must accrue before locking orientation; `--orientation-min-detections` sets how many rotation hypotheses need to detect a pose on the same frame (default 2).
   * If you'd like the auto-orientation stage to log every frame it inspected (including the per-rotation scores/landmarks), add the debug switches and point them to an output folder:
   ```bash
   python sample_patient_processing.py \
