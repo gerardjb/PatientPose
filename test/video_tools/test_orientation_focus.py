@@ -95,6 +95,7 @@ def test_orientation_analyzer_uses_anchor_neighborhood(monkeypatch, tmp_path) ->
         def __init__(self) -> None:
             self.quick_rejects = 0
             self._requested = False
+            self.center_index: int | None = None
 
         def uniform_samples(self):
             yield sample_initial
@@ -104,7 +105,7 @@ def test_orientation_analyzer_uses_anchor_neighborhood(monkeypatch, tmp_path) ->
             if self._requested:
                 return []
             self._requested = True
-            assert center_index == sample_anchor.frame_index
+            self.center_index = center_index
             assert radius == 1
             return [sample_neighbor_before, sample_neighbor_after]
 
@@ -187,7 +188,9 @@ def test_orientation_analyzer_uses_anchor_neighborhood(monkeypatch, tmp_path) ->
     decision = analyzer.analyze(video_path, pose_model)
 
     assert decision.rotation_code == cv2.ROTATE_90_CLOCKWISE
-    assert decision.reason.startswith("vote")
+    assert decision.reason == "good-target"
+    assert fake_sampler._requested is True
+    assert fake_sampler.center_index is not None
     assert decision.focus_hint is not None
     assert decision.focus_hint.rotation_code == cv2.ROTATE_90_CLOCKWISE
     assert decision.focus_hint.bbox[0] <= decision.focus_hint.bbox[2]
@@ -307,7 +310,7 @@ def test_orientation_analyzer_first_to_good_threshold(monkeypatch, tmp_path) -> 
     decision = analyzer.analyze(video_path, pose_model)
 
     assert decision.rotation_code == cv2.ROTATE_90_CLOCKWISE
-    assert decision.reason.startswith("vote")
+    assert decision.reason == "good-target"
     assert decision.focus_hint is not None
     assert decision.focus_hint.frame_index == 0
 

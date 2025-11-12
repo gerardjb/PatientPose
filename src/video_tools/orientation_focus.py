@@ -158,20 +158,12 @@ class OrientationAnalyzer:
                         first_good_observation,
                         detections_seen,
                     )
-                    if triggered:
-                        return self._finalize_decision(
-                            good_pose_rotation,
-                            "good-target",
-                            all_observations,
-                            debug_entries,
-                            sampler,
-                            video_path,
-                            first_good_observation,
-                        )
                     best_observation = self._pick_best(best_observation, valid_observations)
                     if self.config.debug_enabled:
                         debug_entries.extend(self._observations_to_debug(valid_observations, sample))
 
+                    neighbor_triggered = False
+                    neighbor_rotation: int | None = None
                     if anchor_buffer.anchor and anchor_buffer.need_more_neighbors():
                         neighbors = sampler.request_neighbors(anchor_buffer.anchor.frame_index, self.config.anchor_radius)
                         for neighbor in neighbors:
@@ -200,19 +192,26 @@ class OrientationAnalyzer:
                                 first_good_observation,
                                 detections_seen,
                             )
-                            if triggered:
-                                return self._finalize_decision(
-                                    good_pose_rotation,
-                                    "good-target",
-                                    all_observations,
-                                    debug_entries,
-                                    sampler,
-                                    video_path,
-                                    first_good_observation,
-                                )
+                            if triggered and not neighbor_triggered:
+                                neighbor_triggered = True
+                                neighbor_rotation = good_pose_rotation
                             best_observation = self._pick_best(best_observation, valid_neighbor_observations)
                             if self.config.debug_enabled:
                                 debug_entries.extend(self._observations_to_debug(valid_neighbor_observations, neighbor))
+                    if neighbor_triggered:
+                        triggered = True
+                        good_pose_rotation = neighbor_rotation
+
+                    if triggered:
+                        return self._finalize_decision(
+                            good_pose_rotation,
+                            "good-target",
+                            all_observations,
+                            debug_entries,
+                            sampler,
+                            video_path,
+                            first_good_observation,
+                        )
         finally:
             cap.release()
 
