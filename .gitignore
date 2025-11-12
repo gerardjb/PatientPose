@@ -53,3 +53,6 @@ Thumbs.db
 # pytest things
 .pytest_cache/
 .cache/
+
+# dropped cores, just in case
+core*
