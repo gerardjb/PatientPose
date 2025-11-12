@@ -9,11 +9,17 @@ enough flexibility for future polish (packaging, previews, etc.).
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import re
+import sys
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
+
+import cv2
 
 try:
     import FreeSimpleGUI as sg
@@ -55,6 +61,7 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
 
 # Event keys
 PROCESS_DONE_EVENT = "-PROCESS_DONE-"
+PROCESS_STATUS_EVENT = "-PROCESS_STATUS-"
 
 # Fallback recipe definitions; written out the first time if no config exists
 DEFAULT_RECIPES: Dict[str, Dict[str, Any]] = {
@@ -456,16 +463,91 @@ def ensure_models_present() -> Optional[str]:
     return None
 
 
-def process_videos_batch(video_paths: List[str]) -> Dict[str, Any]:
+FORWARD_PROGRESS_PATTERN = re.compile(r"Processed\s+(\d+)\s+frames?\.?", re.IGNORECASE)
+
+
+def _describe_rotation(rotation_code: int | None) -> str:
+    mapping = {
+        None: "no rotation",
+        cv2.ROTATE_90_CLOCKWISE: "90° clockwise",
+        cv2.ROTATE_90_COUNTERCLOCKWISE: "90° counter-clockwise",
+        cv2.ROTATE_180: "180°",
+    }
+    return mapping.get(rotation_code, "unknown rotation")
+
+
+def _safe_frame_count(video_path: Path) -> Optional[int]:
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return None
+    try:
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    finally:
+        cap.release()
+    return frame_count if frame_count > 0 else None
+
+
+class _ForwardPassLogger(io.TextIOBase):
+    """Intercept stdout lines to surface frame progress updates."""
+
+    def __init__(self, tee_stream: io.TextIOBase, line_handler: Callable[[str], None]) -> None:
+        self._tee_stream = tee_stream
+        self._line_handler = line_handler
+        self._buffer = ""
+
+    def write(self, data: str) -> int:  # type: ignore[override]
+        if not data:
+            return 0
+        if self._tee_stream:
+            self._tee_stream.write(data)
+        self._buffer += data
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._line_handler(line.rstrip())
+        return len(data)
+
+    def flush(self) -> None:  # type: ignore[override]
+        if self._tee_stream:
+            self._tee_stream.flush()
+        if self._buffer:
+            self._line_handler(self._buffer.rstrip())
+            self._buffer = ""
+
+
+def _emit_status(callback: Optional[Callable[[Dict[str, Any]], None]], payload: Dict[str, Any]) -> None:
+    if not callback:
+        return
+    try:
+        callback(payload)
+    except Exception:
+        # Best effort; GUI may have closed or no longer accept events.
+        pass
+
+
+def process_videos_batch(
+    video_paths: List[str], status_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+) -> Dict[str, Any]:
     hand_model_path = DEFAULT_MODEL_DIR / HAND_MODEL_FILENAME
     pose_model_path = DEFAULT_MODEL_DIR / POSE_MODEL_FILENAME
 
     results: List[Dict[str, Any]] = []
     success_count = 0
+    total_jobs = len(video_paths)
 
-    for path_str in video_paths:
+    for idx, path_str in enumerate(video_paths, start=1):
         video_path = Path(path_str)
+        total_frames = _safe_frame_count(video_path)
+        orientation_complete = False
+        base_payload = {
+            "video": str(video_path),
+            "position": idx,
+            "total_videos": total_jobs,
+        }
         try:
+            _emit_status(
+                status_callback,
+                {**base_payload, "phase": "orientation", "state": "start"},
+            )
             rotation_code, pose_focus_hint = determine_rotation_code(
                 video_path,
                 pose_model_path,
@@ -473,12 +555,65 @@ def process_videos_batch(video_paths: List[str]) -> Dict[str, Any]:
                 auto_orient=True,
                 return_details=True,
             )
-            process_video(
-                video_path,
-                hand_model_path,
-                pose_model_path,
-                rotation_code,
-                pose_focus_hint=pose_focus_hint,
+            orientation_complete = True
+            _emit_status(
+                status_callback,
+                {
+                    **base_payload,
+                    "phase": "orientation",
+                    "state": "complete",
+                    "rotation_label": _describe_rotation(rotation_code),
+                },
+            )
+            _emit_status(
+                status_callback,
+                {
+                    **base_payload,
+                    "phase": "forward-pass",
+                    "state": "start",
+                    "total_frames": total_frames,
+                },
+            )
+
+            def handle_forward_line(line: str) -> None:
+                match = FORWARD_PROGRESS_PATTERN.search(line)
+                if not match:
+                    return
+                processed_frames = int(match.group(1))
+                percent = None
+                if total_frames:
+                    percent = min(int((processed_frames / total_frames) * 100), 100)
+                _emit_status(
+                    status_callback,
+                    {
+                        **base_payload,
+                        "phase": "forward-pass",
+                        "state": "progress",
+                        "frames": processed_frames,
+                        "total_frames": total_frames,
+                        "percent": percent,
+                    },
+                )
+
+            forward_logger = _ForwardPassLogger(sys.stdout, handle_forward_line)
+            with contextlib.redirect_stdout(forward_logger):
+                process_video(
+                    video_path,
+                    hand_model_path,
+                    pose_model_path,
+                    rotation_code,
+                    pose_focus_hint=pose_focus_hint,
+                )
+            _emit_status(
+                status_callback,
+                {
+                    **base_payload,
+                    "phase": "forward-pass",
+                    "state": "complete",
+                    "frames": total_frames,
+                    "total_frames": total_frames,
+                    "percent": 100 if total_frames else None,
+                },
             )
             output_video = VIDEO_DIR / f"deidentified_{video_path.stem}.avi"
             output_csv = CSV_DIR / f"landmarks_{video_path.stem}.csv"
@@ -492,6 +627,16 @@ def process_videos_batch(video_paths: List[str]) -> Dict[str, Any]:
                 }
             )
         except Exception as exc:  # pragma: no cover - rely on runtime feedback
+            phase = "forward-pass" if orientation_complete else "orientation"
+            _emit_status(
+                status_callback,
+                {
+                    **base_payload,
+                    "phase": phase,
+                    "state": "error",
+                    "error": str(exc),
+                },
+            )
             results.append(
                 {
                     "video": str(video_path),
@@ -501,6 +646,57 @@ def process_videos_batch(video_paths: List[str]) -> Dict[str, Any]:
             )
 
     return {"success": success_count, "total": len(video_paths), "results": results}
+
+
+def handle_processing_status(window: sg.Window, payload: Optional[Dict[str, Any]]) -> None:
+    if not payload:
+        return
+    video_path = payload.get("video")
+    video_name = Path(video_path).name if video_path else "Processing"
+    position = payload.get("position")
+    total_videos = payload.get("total_videos")
+    if isinstance(position, int) and isinstance(total_videos, int) and total_videos > 0:
+        label = f"{video_name} ({position}/{total_videos})"
+    else:
+        label = video_name
+    phase = payload.get("phase")
+    state = payload.get("state")
+
+    message = ""
+
+    if phase == "orientation":
+        if state == "start":
+            message = f"{label}: Assessing orientation..."
+        elif state == "complete":
+            rotation_label = payload.get("rotation_label")
+            suffix = f" ({rotation_label})" if rotation_label else ""
+            message = f"{label}: Orientation assessment complete{suffix}."
+        elif state == "error":
+            message = f"{label}: Orientation failed — {payload.get('error', 'Unknown error')}."
+    elif phase == "forward-pass":
+        if state == "start":
+            total_frames = payload.get("total_frames")
+            if total_frames:
+                message = f"{label}: Forward pass started ({total_frames} frames)."
+            else:
+                message = f"{label}: Forward pass started."
+        elif state == "progress":
+            percent = payload.get("percent")
+            frames = payload.get("frames")
+            total_frames = payload.get("total_frames")
+            if percent is not None and frames is not None and total_frames:
+                message = f"{label}: Forward pass {percent}% ({frames}/{total_frames} frames)."
+            elif frames is not None:
+                message = f"{label}: Forward pass processed {frames} frames."
+            else:
+                message = f"{label}: Forward pass in progress..."
+        elif state == "complete":
+            message = f"{label}: Forward pass complete."
+        elif state == "error":
+            message = f"{label}: Forward pass failed — {payload.get('error', 'Unknown error')}."
+
+    if message:
+        set_status(window, message)
 
 
 def main() -> None:
@@ -528,6 +724,10 @@ def main() -> None:
         if event in (sg.WINDOW_CLOSED, "Exit"):
             set_status(window, "Goodbye!")
             break
+
+        if event == PROCESS_STATUS_EVENT:
+            handle_processing_status(window, values.get(PROCESS_STATUS_EVENT))
+            continue
 
         if event == "-FOLDER-":
             current_folder = Path(values["-FOLDER-"]).expanduser()
@@ -634,13 +834,19 @@ def main() -> None:
             processing_active = True
             window["-PROCESS-"].update(disabled=True)
             set_status(window, f"Processing {len(job_paths)} video(s)...")
+
+            def status_callback(payload: Dict[str, Any]) -> None:
+                try:
+                    window.write_event_value(PROCESS_STATUS_EVENT, payload)
+                except Exception:
+                    pass
             if hasattr(window, "perform_long_operation"):
                 window.perform_long_operation(
-                    lambda paths=job_paths: process_videos_batch(paths),
+                    lambda paths=job_paths, cb=status_callback: process_videos_batch(paths, status_callback=cb),
                     PROCESS_DONE_EVENT,
                 )
             else:  # pragma: no cover - fallback path
-                result = process_videos_batch(job_paths)
+                result = process_videos_batch(job_paths, status_callback=status_callback)
                 window.write_event_value(PROCESS_DONE_EVENT, result)
             continue
 
