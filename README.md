@@ -79,6 +79,30 @@ python video_labeling_gui.py
   * Use `Process selected` to run the full de-identification pipeline on the highlighted clips. Outputs overwrite any prior runs and land in `results/OutputVideos/` and `results/OutputCSVs/`. Missing model files (e.g., `models/face_detection_yunet_2023mar.onnx` for the YuNet face detector that ships with the repo) or processing errors are reported inline.
   * When you're ready to export the current batch of labels, click `Export all` to write a timestamped JSON file in `results/label_exports/`.
   * Note: Mediapipe now attempts to load optional audio modules on import, which can hang if the system is missing PortAudio. All scripts set `MEDIAPIPE_SKIP_AUDIO=1` automatically, but if you run custom code be sure to export that environment variable (or install PortAudio) before launching Python.
+
+## Mocopi utilities (BVH + camera alignment)
+- New Mocopi helpers live in `scripts/` to align BVH against MediaPipe keypoints and visualize or export comparisons:
+  * Quick offset estimate (egocentric wrist features) and correlation report:
+  ```bash
+  python -m scripts.mocopi_sync_example \
+    --bvh sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
+    --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv
+  ```
+  * Side-by-side video (left = deidentified camera video with overlay, right = Mocopi skeleton scaled to its travel span):
+  ```bash
+  python -m scripts.mocopi_side_by_side \
+    --bvh sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
+    --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv \
+    --output results/OutputVideos/mocopi_vs_camera_ND_1a.avi
+  ```
+  * Per-frame reliability export (egocentric, scale-normalized error per joint/landmark):
+  ```bash
+  python -m scripts.mocopi_reliability_export \
+    --bvh sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
+    --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv \
+    --output results/mocopi_camera_reliability_ND_1a.csv
+  ```
+  The exported CSV (`time_s`, `joint`, `landmark`, `error_2d`, and the egocentric displacements) is meant for downstream guard-rail analysis. Offsets are estimated automatically unless you provide `--offset_ms`.
 ## Updating the version of the repo on your local machine
 Git allows you to update to the latest version of the codebase as long as you're in the project root as:
 ```bash
