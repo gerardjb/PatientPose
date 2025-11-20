@@ -60,6 +60,7 @@ CAMERA_EDGES = [
 ]
 
 MOCOPI_JOINTS = [
+    "root",
     "torso_7",
     "neck_1",
     "neck_2",
@@ -243,8 +244,20 @@ def _prepare_mocopi_positions(seq, joints: list[str]) -> Tuple[np.ndarray, Dict[
         x_min = y_min = -1.0
         x_max = y_max = 1.0
 
-    # Store extents for later scaling
+    # Store extents for later vertical scaling
     joint_positions["_extents"] = np.array([[x_min, x_max, y_min, y_max]], dtype=float)
+
+    # Also store the travel range of the root joint (if available) so we can
+    # stretch the forward path to fill the panel horizontally without
+    # affecting any synchronization calculations.
+    if "root" in joint_positions:
+        root_pos = joint_positions["root"]
+        walk_min = float(root_pos[:, 0].min())
+        walk_max = float(root_pos[:, 0].max())
+    else:
+        walk_min, walk_max = x_min, x_max
+    joint_positions["_walk_range"] = np.array([[walk_min, walk_max]], dtype=float)
+
     return timestamps_ms, joint_positions
 
 
@@ -265,7 +278,14 @@ def _draw_mocopi_skeleton(
     if extents is None:
         return
     x_min, x_max, y_min, y_max = extents[0]
-    if x_max <= x_min or y_max <= y_min:
+
+    walk_range = joints_positions.get("_walk_range")
+    if walk_range is not None:
+        walk_min, walk_max = walk_range[0]
+    else:
+        walk_min, walk_max = x_min, x_max
+
+    if walk_max <= walk_min or y_max <= y_min:
         return
 
     # Find nearest Mocopi frame for the requested time
@@ -282,8 +302,11 @@ def _draw_mocopi_skeleton(
             continue
         x, y = float(pos[idx, 0]), float(pos[idx, 1])
 
-        # Normalize into [0, 1] range and map to canvas
-        xn = (x - x_min) / (x_max - x_min + 1e-6)
+        # Normalize into [0, 1] range and map to canvas.
+        # Horizontally, use the root's travel range so the forward
+        # path fills the panel; vertically, use the overall Y extents.
+        xn = (x - walk_min) / (walk_max - walk_min + 1e-6)
+        xn = float(np.clip(xn, 0.0, 1.0))
         yn = (y - y_min) / (y_max - y_min + 1e-6)
         yn = 1.0 - yn  # Flip vertical so up is up
 
