@@ -413,6 +413,7 @@ def extract_landmarks_for_frame(
                         'instance_id': instance_idx, 'handedness': handedness_label,
                         'landmark_id': landmark_idx, 'landmark_name': landmark_name,
                         'x': landmark.x, 'y': landmark.y, 'z': landmark.z,
+                        'visibility': getattr(landmark, "visibility", np.nan),
                     })
 
     # Process Pose Landmarks
@@ -425,6 +426,7 @@ def extract_landmarks_for_frame(
                     'instance_id': instance_idx, 'handedness': 'N/A',
                     'landmark_id': landmark_idx, 'landmark_name': landmark_name,
                     'x': landmark.x, 'y': landmark.y, 'z': landmark.z,
+                    'visibility': getattr(landmark, "visibility", np.nan),
                 })
 
     return frame_data

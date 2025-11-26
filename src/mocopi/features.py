@@ -183,6 +183,7 @@ def compute_camera_egocentric_positions(
     df: pd.DataFrame,
     landmark_names: Sequence[str],
     com_landmarks: Sequence[str] | None = None,
+    visibility_threshold: float | None = 0.8,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """
     Compute per-frame egocentric 2D positions for selected camera landmarks.
@@ -192,7 +193,9 @@ def compute_camera_egocentric_positions(
     normalizes by a per-frame body scale so that distance to the camera does
     not dominate the trajectories. The vertical component is flipped so that
     increasing values correspond to motion "upward" in the image, to match
-    the Mocopi convention where +Y is roughly up.
+    the Mocopi convention where +Y is roughly up. Landmarks with visibility
+    below `visibility_threshold` (default 0.8) are treated as missing; pass
+    None to disable thresholding.
     """
     pose_df = df[df["source"] == "pose"].copy()
     if pose_df.empty:
@@ -201,6 +204,7 @@ def compute_camera_egocentric_positions(
     if com_landmarks is None:
         core = ["LEFT_HIP", "RIGHT_HIP", "LEFT_SHOULDER", "RIGHT_SHOULDER"]
         com_landmarks = core
+    has_visibility = "visibility" in pose_df.columns
 
     frames = sorted(pose_df["frame"].unique())
     timestamps: list[float] = []
@@ -215,6 +219,10 @@ def compute_camera_egocentric_positions(
 
         by_name: dict[str, tuple[float, float]] = {}
         for _, row in sub.iterrows():
+            vis = float(row["visibility"]) if has_visibility else 1.0
+            if visibility_threshold is not None:
+                if np.isnan(vis) or vis < visibility_threshold:
+                    continue
             by_name[str(row["landmark_name"])] = (float(row["x"]), float(row["y"]))
 
         com_candidates = [by_name[name] for name in com_landmarks if name in by_name]

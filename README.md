@@ -70,6 +70,30 @@ python sample_patient_processing.py --filename "your_file.extension"
   ```
     - The CLI prints the per-rotation quality breakdown for the preset “bad” (0/10/20/30) and “good” (75/85/95) frames found in `sample_data\PXL_20251106_173128817_identifiable_and_rotated.mp4`, while the optional `results/pose_quality_debug.mp4` captures the annotated crops (frame number, rotation label, score, landmarks) for the test frames.
       - Note*: parameters are currently hard-coded within script itself, but I might update this as a TODO if this ends up being a persistent place driving issues.
+
+## Mocopi utilities (BVH + camera alignment)
+- New Mocopi helpers live in `scripts/` to align BVH against MediaPipe keypoints and visualize or export comparisons:
+  * Quick offset estimate (egocentric wrist features) and correlation report:
+  ```bash
+  python -m scripts.mocopi_sync_example \
+    --bvh sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
+    --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv
+  ```
+  * Side-by-side video (left = deidentified camera video with overlay, right = Mocopi skeleton scaled to its travel span):
+  ```bash
+  python -m scripts.mocopi_side_by_side \
+    --bvh sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
+    --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv \
+    --output results/OutputVideos/mocopi_vs_camera_ND_1a.avi
+  ```
+  * Per-frame reliability export (egocentric, scale-normalized error per joint/landmark):
+  ```bash
+  python -m scripts.mocopi_reliability_export \
+    --bvh sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
+    --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv \
+    --output results/mocopi_camera_reliability_ND_1a.csv
+  ```
+  The exported CSV (`time_s`, `joint`, `landmark`, `error_2d`, and the egocentric displacements) is meant for downstream guard-rail analysis. Offsets are estimated automatically unless you provide `--offset_ms`.
 - A labeling GUI for batching metadata entry lives at `scripts/video_labeling_gui.py`. It relies on the community-maintained `FreeSimpleGUI` package bundled with the project dependencies. Launch it from the `scripts` directory with:
 ```bash
 python video_labeling_gui.py
