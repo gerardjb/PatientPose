@@ -95,10 +95,9 @@ else: # No rotation or 180 degrees
 
 # Setup writer for the quality visualization composite video
 new_fps = 5 # Reduced FPS for quality video
-output_quality_video_path = os.path.join(VIDEO_DIR, f'quality_vis_{video_name_tag}.mp4')
-output_quality_video_plain_path = os.path.join(VIDEO_DIR, f'quality_vis_no_keypoints_{video_name_tag}.mp4')
-# Use a broadly supported MPEG-4 codec for smaller, easier-to-share output files.
-fourcc_quality = cv2.VideoWriter_fourcc(*'mp4v')
+output_quality_video_path = os.path.join(VIDEO_DIR, f'quality_vis_{video_name_tag}.avi')
+output_quality_video_plain_path = os.path.join(VIDEO_DIR, f'quality_vis_no_keypoints_{video_name_tag}.avi')
+fourcc_quality = cv2.VideoWriter_fourcc(*'MJPG')
 quality_video_writer = cv2.VideoWriter(output_quality_video_path, fourcc_quality, new_fps, (output_width, output_height))
 quality_video_plain_writer = cv2.VideoWriter(output_quality_video_plain_path, fourcc_quality, new_fps, (output_width, output_height))
 
