@@ -68,9 +68,11 @@ def process_video(
         output_height = original_height
 
     video_name_tag = video_path.stem
-    output_video_path = VIDEO_DIR / f"deidentified_{video_name_tag}.avi"
+    output_video_path = VIDEO_DIR / f"blur_stack_{video_name_tag}.avi"
+    output_video_plain_path = VIDEO_DIR / f"blur_stack_no_keypoints_{video_name_tag}.avi"
     fourcc = cv2.VideoWriter_fourcc(*"MJPG")
     writer = cv2.VideoWriter(str(output_video_path), fourcc, fps, (output_width, output_height))
+    plain_writer = cv2.VideoWriter(str(output_video_plain_path), fourcc, fps, (output_width, output_height))
 
     hand_options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=str(hand_model_path)),
@@ -142,6 +144,7 @@ def process_video(
             all_landmarks.extend(frame_landmarks)
 
             anonymized_frame = blur_face_with_pose(frame_rgb, pose_result)
+            plain_writer.write(cv2.cvtColor(anonymized_frame, cv2.COLOR_RGB2BGR))
             annotated_frame = draw_pose_landmarks(anonymized_frame, pose_result)
             writer.write(cv2.cvtColor(annotated_frame, cv2.COLOR_RGB2BGR))
 
@@ -151,6 +154,7 @@ def process_video(
 
     cap.release()
     writer.release()
+    plain_writer.release()
 
     if all_landmarks:
         landmarks_df = pd.DataFrame(all_landmarks)
@@ -159,6 +163,7 @@ def process_video(
         print(f"Landmark data saved to {output_csv_path}")
 
     print(f"De-identified video saved to {output_video_path}")
+    print(f"De-identified video without keypoints saved to {output_video_plain_path}")
 
 
 def parse_args() -> argparse.Namespace:
