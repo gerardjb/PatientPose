@@ -68,8 +68,8 @@ def process_video(
         output_height = original_height
 
     video_name_tag = video_path.stem
-    output_video_path = VIDEO_DIR / f"blur_stack_{video_name_tag}.avi"
-    output_video_plain_path = VIDEO_DIR / f"blur_stack_no_keypoints_{video_name_tag}.avi"
+    output_video_path = VIDEO_DIR / f"deidentified_{video_name_tag}.avi"
+    output_video_plain_path = VIDEO_DIR / f"deidentified_no_keypoints_{video_name_tag}.avi"
     fourcc = cv2.VideoWriter_fourcc(*"MJPG")
     writer = cv2.VideoWriter(str(output_video_path), fourcc, fps, (output_width, output_height))
     plain_writer = cv2.VideoWriter(str(output_video_plain_path), fourcc, fps, (output_width, output_height))
