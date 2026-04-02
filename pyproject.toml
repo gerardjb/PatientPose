@@ -27,6 +27,9 @@ dependencies = [
     "FreeSimpleGUI"
 ]
 
+[project.scripts]
+patientpose = "patientpose.cli:main"
+
 # Optional dependencies, grouped by purpose (e.g., testing, development)
 [project.optional-dependencies]
 test = [
