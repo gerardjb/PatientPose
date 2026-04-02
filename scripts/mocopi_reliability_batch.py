@@ -1,12 +1,7 @@
 from __future__ import annotations
 
 """
-Batch runner for mocopi_reliability_export using the current ND_pilot naming scheme.
-
-For each ND_* video in sample_data that has:
-    - a matching A_* unfiltered video, and
-    - a matching BVH in sample_data/ND_pilot/Re_ Mocopi with the same tag,
-this script calls mocopi_reliability_export to produce a per-frame error CSV.
+Batch runner for mocopi_reliability_export across legacy ND_pilot pairs and session folders.
 
 Example:
     python -m scripts.mocopi_reliability_batch
@@ -16,16 +11,24 @@ Example:
 import argparse
 from pathlib import Path
 
-from mocopi.nd_pilot import TrialPair, discover_pairs
-from mocopi.reliability import ensure_reliability_csv
+import pandas as pd
+
+from mocopi.nd_pilot import TrialPair, discover_pairs, discover_sessions, parse_camera_role_specs
+from mocopi.reliability import RELIABILITY_COLUMNS, ensure_reliability_csv
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Batch run mocopi_reliability_export for ND_pilot pairs.")
+    parser = argparse.ArgumentParser(description="Batch run mocopi_reliability_export for discovered Mocopi/camera pairs.")
     parser.add_argument(
         "--tags",
         nargs="+",
-        help="Optional subset of tags to process (e.g., 1a 1b). If omitted, process all discovered pairs.",
+        help="Optional subset of pair ids to process. Legacy mode uses tags like 1a; session mode uses session ids.",
+    )
+    parser.add_argument(
+        "--camera-role",
+        action="append",
+        default=None,
+        help="Session-mode camera mapping in the form CAMERA_ID=ROLE, where ROLE is A or ND.",
     )
     parser.add_argument(
         "--output-dir",
@@ -56,7 +59,7 @@ def parse_args() -> argparse.Namespace:
 
 def run_for_pair(pair: TrialPair, output_dir: Path, offset_ms: float | None, search_ms: float, rate_hz: float) -> None:
     """
-    Invoke mocopi_reliability_export for a single ND/A/BVH triplet.
+    Invoke mocopi_reliability_export for a single ND/A/Mocopi triplet.
     """
     nd_stem = pair.nd_video.stem  # e.g., ND_1a_...
     camera_csv = Path("results/OutputCSVs") / f"landmarks_{nd_stem}.csv"
@@ -68,26 +71,38 @@ def run_for_pair(pair: TrialPair, output_dir: Path, offset_ms: float | None, sea
     output_path = output_dir / f"mocopi_camera_reliability_{nd_stem}.csv"
 
     print(f"Running reliability export for tag {pair.tag} -> {nd_stem}")
-    ensure_reliability_csv(
-        pair.bvh,
+    output_csv = ensure_reliability_csv(
+        pair.motion_source,
         camera_csv,
         output_path,
         offset_ms,
         search_ms,
         rate_hz,
     )
+    df = None
+    try:
+        df = pd.read_csv(output_csv)
+    except Exception:
+        df = None
+    if df is not None and list(df.columns) == RELIABILITY_COLUMNS and df.empty:
+        print(f"Skipping metrics for {nd_stem}: camera CSV contains no usable pose landmarks.")
 
 
 def main() -> None:
     args = parse_args()
     base = Path(__file__).resolve().parent.parent
-    pairs = discover_pairs(base)
+    camera_roles = parse_camera_role_specs(args.camera_role)
+    pairs = discover_pairs(base, camera_roles=camera_roles)
     if args.tags:
         tags = {t for t in args.tags}
         pairs = [p for p in pairs if p.tag in tags]
 
     if not pairs:
-        print("No matching ND/A/BVH pairs found under sample_data/ND_pilot.")
+        sessions = discover_sessions(base)
+        if sessions and not camera_roles:
+            print("Discovered session folders, but no session pairs were resolved. Add --camera-role CAMERA_ID=A and --camera-role CAMERA_ID=ND.")
+        else:
+            print("No matching Mocopi/camera pairs found.")
         return
 
     for pair in pairs:

@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from mocopi import load_bvh
-from mocopi.reliability import export_reliability_errors
+from mocopi import load_mocopi_recording
+from mocopi.features import NoCameraPoseDataError
+from mocopi.reliability import RELIABILITY_COLUMNS, export_reliability_errors
 from mocopi.sync import estimate_camera_to_mocopi_offset
 
 
@@ -16,7 +17,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Export per-frame Mocopi vs MediaPipe egocentric errors."
     )
-    parser.add_argument("--bvh", type=Path, required=True, help="Path to Mocopi BVH file.")
+    parser.add_argument(
+        "--motion",
+        "--bvh",
+        dest="motion_source",
+        type=Path,
+        required=True,
+        help="Path to Mocopi motion source (.bvh, .bin, or session directory).",
+    )
     parser.add_argument(
         "--camera_csv",
         type=Path,
@@ -97,22 +105,28 @@ def compute_or_use_offset(
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    seq = load_bvh(args.bvh)
+    seq = load_mocopi_recording(args.motion_source)
     cam_df = pd.read_csv(args.camera_csv)
 
-    offset_ms = compute_or_use_offset(
-        seq,
-        cam_df,
-        args.search_ms,
-        args.rate_hz,
-        args.offset_ms,
-        clip_start_s=args.clip_start,
-        clip_end_s=args.clip_end,
-    )
-    df_out = export_reliability_errors(seq, cam_df, args.joints, args.landmarks, offset_ms)
+    try:
+        offset_ms = compute_or_use_offset(
+            seq,
+            cam_df,
+            args.search_ms,
+            args.rate_hz,
+            args.offset_ms,
+            clip_start_s=args.clip_start,
+            clip_end_s=args.clip_end,
+        )
+        df_out = export_reliability_errors(seq, cam_df, args.joints, args.landmarks, offset_ms)
+    except NoCameraPoseDataError:
+        df_out = pd.DataFrame(columns=RELIABILITY_COLUMNS)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     df_out.to_csv(args.output, index=False)
-    print(f"Wrote {len(df_out)} rows to {args.output}")
+    if df_out.empty:
+        print(f"Wrote empty reliability CSV to {args.output} because the camera CSV had no usable pose landmarks.")
+    else:
+        print(f"Wrote {len(df_out)} rows to {args.output}")
 
 
 if __name__ == "__main__":

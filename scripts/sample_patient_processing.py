@@ -44,6 +44,39 @@ PoseLandmarker = mp.tasks.vision.PoseLandmarker
 PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
+LANDMARK_COLUMNS = [
+    "frame",
+    "timestamp_ms",
+    "source",
+    "instance_id",
+    "handedness",
+    "landmark_id",
+    "landmark_name",
+    "x",
+    "y",
+    "z",
+    "visibility",
+]
+FRAME_SUMMARY_COLUMNS = [
+    "frame",
+    "timestamp_ms",
+    "pose_detected",
+    "num_pose_landmarks",
+    "hand_detected",
+    "num_hand_landmarks",
+    "pose_quality_score",
+]
+
+
+def _pose_quality_value(pose_quality) -> float:
+    if pose_quality is None:
+        return float("nan")
+    for attr in ("score", "overall_score", "value"):
+        value = getattr(pose_quality, attr, None)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return float("nan")
+
 
 def process_video(
     video_path: Path,
@@ -90,6 +123,7 @@ def process_video(
 
     frame_index = 0
     all_landmarks: List[dict] = []
+    frame_summaries: List[dict] = []
 
     focus_tracker = PoseFocusTracker(pose_focus_hint) if pose_focus_hint else None
     pose_quality_scorer = PoseQualityScorer()
@@ -142,6 +176,23 @@ def process_video(
 
             frame_landmarks = extract_landmarks_for_frame(frame_index, timestamp_ms, hand_result, pose_result)
             all_landmarks.extend(frame_landmarks)
+            num_pose_landmarks = 0
+            if pose_result.pose_landmarks:
+                num_pose_landmarks = sum(len(landmarks) for landmarks in pose_result.pose_landmarks)
+            num_hand_landmarks = 0
+            if hand_result.hand_landmarks:
+                num_hand_landmarks = sum(len(landmarks) for landmarks in hand_result.hand_landmarks)
+            frame_summaries.append(
+                {
+                    "frame": frame_index,
+                    "timestamp_ms": timestamp_ms,
+                    "pose_detected": bool(pose_result.pose_landmarks),
+                    "num_pose_landmarks": int(num_pose_landmarks),
+                    "hand_detected": bool(hand_result.hand_landmarks),
+                    "num_hand_landmarks": int(num_hand_landmarks),
+                    "pose_quality_score": _pose_quality_value(pose_quality),
+                }
+            )
 
             anonymized_frame = blur_face_with_pose(frame_rgb, pose_result)
             plain_writer.write(cv2.cvtColor(anonymized_frame, cv2.COLOR_RGB2BGR))
@@ -156,11 +207,18 @@ def process_video(
     writer.release()
     plain_writer.release()
 
+    landmarks_df = pd.DataFrame(all_landmarks, columns=LANDMARK_COLUMNS)
+    output_csv_path = CSV_DIR / f"landmarks_{video_name_tag}.csv"
+    landmarks_df.to_csv(output_csv_path, index=False)
     if all_landmarks:
-        landmarks_df = pd.DataFrame(all_landmarks)
-        output_csv_path = CSV_DIR / f"landmarks_{video_name_tag}.csv"
-        landmarks_df.to_csv(output_csv_path, index=False)
         print(f"Landmark data saved to {output_csv_path}")
+    else:
+        print(f"No landmarks detected; wrote empty landmark CSV to {output_csv_path}")
+
+    frame_summary_df = pd.DataFrame(frame_summaries, columns=FRAME_SUMMARY_COLUMNS)
+    output_summary_path = CSV_DIR / f"landmarks_summary_{video_name_tag}.csv"
+    frame_summary_df.to_csv(output_summary_path, index=False)
+    print(f"Frame summary saved to {output_summary_path}")
 
     print(f"De-identified video saved to {output_video_path}")
     print(f"De-identified video without keypoints saved to {output_video_plain_path}")

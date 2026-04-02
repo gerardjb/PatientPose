@@ -14,13 +14,24 @@ import numpy as np
 import pandas as pd
 
 from .features import (
+    NoCameraPoseDataError,
     compute_camera_egocentric_positions,
     compute_egocentric_positions,
 )
 from .sync import clean_feature_samples, estimate_camera_to_mocopi_offset
-from .bvh_io import load_bvh
+from .recording_io import load_mocopi_recording
 
 SCALE_REF_JOINTS = ["l_up_leg", "r_up_leg", "l_shoulder", "r_shoulder"]
+RELIABILITY_COLUMNS = [
+    "time_s",
+    "joint",
+    "landmark",
+    "error_2d",
+    "mocopi_dx",
+    "mocopi_dy",
+    "camera_dx",
+    "camera_dy",
+]
 
 
 def compute_body_scale_series(
@@ -103,7 +114,7 @@ def export_reliability_errors(
 
 
 def ensure_reliability_csv(
-    bvh: Path,
+    motion_source: Path,
     camera_csv: Path,
     output_csv: Path,
     offset_ms: float | None,
@@ -118,19 +129,28 @@ def ensure_reliability_csv(
     if output_csv.exists():
         return output_csv
 
-    seq = load_bvh(bvh)
+    seq = load_mocopi_recording(motion_source)
     cam_df = pd.read_csv(camera_csv)
-    offset_used = estimate_camera_to_mocopi_offset(
-        seq,
-        cam_df,
-        search_ms,
-        rate_hz,
-        offset_ms,
-        clip_start_s=clip_start_s,
-        clip_end_s=clip_end_s,
-    )
+    try:
+        offset_used = estimate_camera_to_mocopi_offset(
+            seq,
+            cam_df,
+            search_ms,
+            rate_hz,
+            offset_ms,
+            clip_start_s=clip_start_s,
+            clip_end_s=clip_end_s,
+        )
+        df_out = export_reliability_errors(
+            seq,
+            cam_df,
+            ["l_foot", "r_foot", "l_hand", "r_hand"],
+            ["LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_WRIST", "RIGHT_WRIST"],
+            offset_used,
+        )
+    except NoCameraPoseDataError:
+        df_out = pd.DataFrame(columns=RELIABILITY_COLUMNS)
 
-    df_out = export_reliability_errors(seq, cam_df, ["l_foot", "r_foot", "l_hand", "r_hand"], ["LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_WRIST", "RIGHT_WRIST"], offset_used)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     df_out.to_csv(output_csv, index=False)
     return output_csv
@@ -212,7 +232,7 @@ def nd_error_summary(
 
 
 def get_aligned_traces(
-    bvh_path: Path,
+    motion_source: Path,
     camera_csv: Path,
     joints: Sequence[str],
     landmarks: Sequence[str],
@@ -229,7 +249,7 @@ def get_aligned_traces(
         t_s, mocopi_y, camera_y, offset_used
         where t_s is Mocopi time in seconds, and dicts map names to ΔY arrays.
     """
-    seq = load_bvh(bvh_path)
+    seq = load_mocopi_recording(motion_source)
     cam_df = pd.read_csv(camera_csv)
 
     needed_joints = list(dict.fromkeys([*joints, *SCALE_REF_JOINTS]))
@@ -288,6 +308,7 @@ def get_aligned_traces(
 
 __all__ = [
     "SCALE_REF_JOINTS",
+    "RELIABILITY_COLUMNS",
     "compute_body_scale_series",
     "export_reliability_errors",
     "ensure_reliability_csv",

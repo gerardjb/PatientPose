@@ -1,105 +1,112 @@
 # Mocopi utilities and scripts
 
-This guide mirrors the main README style and summarizes the Mocopi helpers, their prerequisites, and the CLI patterns you’ll use most often.
+This guide summarizes the current Mocopi helpers and the two dataset layouts they support.
 
-## Prerequisites
-- Camera CSVs (`results/OutputCSVs/landmarks_*.csv`) must already exist from your MediaPipe landmark extraction pipeline.
-- Reliability/ND plots (`mocopi_reliability_export`, `mocopi_reliability_batch`, `mocopi_pair_report`, `mocopi_nd_summary_plot`, `mocopi_reliability_plot`) depend on reliability CSVs produced by the export/batch scripts.
-- Video demos (`mocopi_side_by_side`, `mocopi_triplet_video`) need matching BVH + camera CSVs and either the raw ND/A MP4s in `sample_data/ND_pilot` or the pre-rendered AVIs noted below.
+## Supported data layouts
 
-## Shared modules (highlights)
-- `mocopi.nd_pilot`: `TrialPair`, `discover_pairs`, `pair_for_tag`
+### 1. Legacy ND-pilot layout
+- Videos live under `sample_data/ND_pilot/` as `A_<tag>_*.mp4` and `ND_<tag>_*.mp4`.
+- Mocopi motion lives under `sample_data/ND_pilot/Re_ Mocopi/` as `MCPM_*_<tag>.bvh`.
+- Pair discovery is automatic from the filename tag.
+
+### 2. Session layout
+- Each capture lives under `sample_data/<session_id>/`.
+- Mocopi motion is stored as `*_mocopi.bin`.
+- Camera videos are stored per phone under `phone_<camera_id>/VID_*.mp4`.
+- Session metadata is stored in `session_log.jsonl`.
+- Pair discovery requires explicit camera-role mapping because the video filenames do not encode `A` vs `ND`.
+
+Example session:
+```text
+sample_data/<sample_file>/
+  session_log.jsonl
+  <sample_file>_mocopi.bin
+  phone_192.168.50.162/<sample_file>.mp4
+  phone_192.168.50.171/<sample_file>.mp4
+```
+
+## Shared modules
+- `mocopi.recording_io`: `load_mocopi_recording`, `load_mocopi_bin`, `resolve_mocopi_source`
+- `mocopi.nd_pilot`: `CameraRecording`, `CaptureSession`, `TrialPair`, `discover_sessions`, `discover_pairs`, `resolve_session_pair`, `parse_camera_role_specs`
 - `mocopi.sync`: `clean_feature_samples`, `estimate_camera_to_mocopi_offset`
-- `mocopi.reliability`: `SCALE_REF_JOINTS`, `compute_body_scale_series`, `export_reliability_errors`, `ensure_reliability_csv`, `nd_factor_from_stem`, `best_joint_from_reliability`, `align_visibility_series`, `align_pose_counts`, `joint_medians`, `nd_error_summary`, `get_aligned_traces`
-- `mocopi.camera_metrics`: `count_visible_landmarks`, `visibility_percent`
-- `mocopi.visualization`: `prepare_camera_landmarks`, `draw_camera_skeleton`, `prepare_mocopi_positions`, `draw_mocopi_skeleton` (plus skeleton edge definitions)
-- `mocopi.plots`: `select_overlap_window`, `plot_egocentric_compare`, `plot_feet_centered`
+- `mocopi.reliability`: `export_reliability_errors`, `ensure_reliability_csv`, `best_joint_from_reliability`, `nd_error_summary`, `get_aligned_traces`
+- `mocopi.visualization`: `prepare_camera_landmarks`, `draw_camera_skeleton`, `prepare_mocopi_positions`, `draw_mocopi_skeleton`
 
-## CLI examples and expected outputs
+## CLI conventions
 
-- `scripts/mocopi_reliability_export.py`  
+### Motion input
+- Scripts that previously required `--bvh` now accept `--motion`.
+- `--motion` accepts:
+  - a `.bvh` file
+  - a session `.bin` file
+  - a session directory containing `*_mocopi.bin`
+- `--bvh` is still accepted as a compatibility alias in the direct motion-loading scripts.
+
+### Session camera-role mapping
+- Pair-based scripts need `--camera-role` when working with session folders.
+- Use one argument per camera:
+  - `--camera-role 192.168.50.162=A`
+  - `--camera-role 192.168.50.171=ND`
+- Accepted roles are `A` and `ND`.
+- Mapping keys can be the bare camera id or the `phone_<camera_id>` directory name.
+
+## CLI examples
+
+- `scripts/mocopi_reliability_export.py`
   ```bash
   python -m scripts.mocopi_reliability_export \
-    --bvh sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
+    --motion sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
     --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv \
     --output results/mocopi_reliability/mocopi_camera_reliability_ND_1a_20140107_104046.csv
   ```
-  - Output: per-frame error CSV at the given path (egocentric, scale-normalized).
 
-- `scripts/mocopi_reliability_batch.py`  
-  ```bash
-  python -m scripts.mocopi_reliability_batch --tags 1a 1b
-  ```
-  - Output: reliability CSVs under `results/mocopi_reliability/` using timestamped names (e.g., `mocopi_camera_reliability_ND_1a_20140107_104046.csv`).
-
-- `scripts/mocopi_reliability_plot.py`  
-  ```bash
-  python -m scripts.mocopi_reliability_plot \
-    --csv results/mocopi_reliability/mocopi_camera_reliability_ND_1a_20140107_104046.csv \
-    --output results/mocopi_reliability_plot.pdf
-  ```
-  - Output: PDF bar plot of per-joint median error.
-
-- `scripts/mocopi_nd_summary_plot.py`  
-  ```bash
-  python -m scripts.mocopi_nd_summary_plot \
-    --inputs ND=2:results/mocopi_reliability/mocopi_camera_reliability_ND_1a_20140107_104046.csv \
-             ND=4:results/mocopi_reliability/mocopi_camera_reliability_ND_1b_20140107_104202.csv \
-    --output results/mocopi_nd_summary.pdf
-  ```
-  - Output: PDF line plot of median error vs ND (log2 x-axis), using the current timestamped reliability CSVs.
-
-- `scripts/mocopi_pair_report.py`  
-  ```bash
-  python -m scripts.mocopi_pair_report --tags 1a --search_ms 5000 --rate_hz 50
-  ```
-  - Outputs: per-tag plots under `results/mocopi_reliability/plots/pair_<tag>_<joint>.pdf`, plus `results/mocopi_reliability/nd_delta_summary.csv` and `nd_ratio_summary.pdf`.
-
-- `scripts/mocopi_fourpanel_triplet.py`  
-  ```bash
-  python -m scripts.mocopi_fourpanel_triplet --tag 1a --offset-ms 0 --output results/fourpanel_1a.pdf
-  ```
-  - Output: four-panel PDF (`results/fourpanel_1a_offset_0.0ms_vis_0.80.pdf`) showing Mocopi vs A vs ND egocentric ΔY and visibility percent.
-
-- `scripts/mocopi_egocentric_compare.py`  
-  ```bash
-  python -m scripts.mocopi_egocentric_compare \
-    --bvh sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
-    --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv \
-    --output results/mocopi_camera_egocentric_ND_1a.png
-  ```
-  - Output: PNG with stacked Mocopi vs camera egocentric ΔY traces over aligned time.
-
-- `scripts/mocopi_side_by_side.py`  
-  ```bash
-  python -m scripts.mocopi_side_by_side \
-    --bvh sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
-    --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv \
-    --video results/OutputVideos/deidentified_ND_1a_20140107_104046.avi \
-    --output results/OutputVideos/mocopi_vs_camera_ND_1a.avi
-  ```
-  - Input note: uses the already-processed AVI in `results/OutputVideos` (orientation + overlay) instead of the raw `sample_data/ND_pilot/ND_1a_20140107_104046.mp4`.
-  - Output: AVI with the provided processed camera panel on the left and Mocopi skeleton on the right.
-
-- `scripts/mocopi_triplet_video.py`  
-  ```bash
-  python -m scripts.mocopi_triplet_video --tags 1a --output-dir results/OutputVideos/triplets
-  ```
-  - Output: AVI per tag (`results/OutputVideos/triplets/triplet_ND_1a_*.avi`) with A video + ND video + Mocopi panel (expects camera CSVs to exist).
-
-- `scripts/mocopi_symmetry_diagnostics.py`  
-  ```bash
-  python -m scripts.mocopi_symmetry_diagnostics --tags 1a --search_ms 5000 --rate_hz 50
-  ```
-  - Output: correlation table to stdout and feet comparison PDFs under `results/mocopi_reliability/symmetry/feet_<tag>_<cond>.pdf`.
-
-- `scripts/mocopi_sync_example.py`  
+- `scripts/mocopi_sync_example.py`
   ```bash
   python -m scripts.mocopi_sync_example \
-    --bvh sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
-    --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv
+    --motion sample_data/<sample_file> \
+    --camera_csv results/OutputCSVs/landmarks_<sample_file>.csv
   ```
-  - Output: console print of estimated camera→mocopi offset and correlation score.
 
-- `scripts/mocopi_pair_utils.py`
-  - Library-only shim; import via `from mocopi.nd_pilot import discover_pairs`.
+- `scripts/mocopi_reliability_batch.py`
+  ```bash
+  python -m scripts.mocopi_reliability_batch \
+    --camera-role 192.168.50.162=A \
+    --camera-role 192.168.50.171=ND
+  ```
+
+- `scripts/mocopi_triplet_video.py`
+  ```bash
+  python -m scripts.mocopi_triplet_video \
+    --tags <sample_file> \
+    --camera-role 192.168.50.162=A \
+    --camera-role 192.168.50.171=ND \
+    --output-dir results/OutputVideos/triplets
+  ```
+
+- `scripts/mocopi_pair_report.py`
+  ```bash
+  python -m scripts.mocopi_pair_report \
+    --camera-role 192.168.50.162=A \
+    --camera-role 192.168.50.171=ND
+  ```
+
+- `scripts/mocopi_fourpanel_triplet.py`
+  ```bash
+  python -m scripts.mocopi_fourpanel_triplet \
+    --tag <sample_file> \
+    --camera-role 192.168.50.162=A \
+    --camera-role 192.168.50.171=ND
+  ```
+
+- `scripts/mocopi_symmetry_diagnostics.py`
+  ```bash
+  python -m scripts.mocopi_symmetry_diagnostics \
+    --camera-role 192.168.50.162=A \
+    --camera-role 192.168.50.171=ND
+  ```
+
+## Outputs and conventions
+- Camera CSVs are still expected under `results/OutputCSVs/landmarks_<video_stem>.csv`.
+- Reliability CSVs are written under `results/mocopi_reliability/`.
+- Video outputs are written under `results/OutputVideos/`.
+- Legacy ND-factor parsing still comes from the ND video stem, so ND summary workflows remain meaningful only for legacy `ND_*` naming or any future session naming scheme that encodes ND level explicitly.

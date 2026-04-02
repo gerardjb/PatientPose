@@ -9,6 +9,10 @@ import pandas as pd
 from .bvh_io import MocopiSequence
 
 
+class NoCameraPoseDataError(ValueError):
+    """Raised when a camera landmarks CSV has no usable pose rows."""
+
+
 @dataclass
 class MocopiFeatureConfig:
     """Configuration for a 1D feature extracted from Mocopi joint positions."""
@@ -199,7 +203,7 @@ def compute_camera_egocentric_positions(
     """
     pose_df = df[df["source"] == "pose"].copy()
     if pose_df.empty:
-        raise ValueError("No pose landmarks found in camera CSV")
+        raise NoCameraPoseDataError("No pose landmarks found in camera CSV")
 
     if com_landmarks is None:
         core = ["LEFT_HIP", "RIGHT_HIP", "LEFT_SHOULDER", "RIGHT_SHOULDER"]

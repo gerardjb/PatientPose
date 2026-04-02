@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Render a side-by-side video comparing camera keypoints and Mocopi BVH keypoints.
+Render a side-by-side video comparing camera keypoints and Mocopi keypoints.
 
 Left panel:
     - Original camera video frames.
@@ -14,7 +14,7 @@ Right panel:
 
 Example:
     python -m scripts.mocopi_side_by_side \\
-        --bvh sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \\
+        --motion sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \\
         --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv \\
         --video sample_data/ND_1a_20140107_104046.mp4 \\
         --output results/OutputVideos/mocopi_vs_camera_ND_1a.avi
@@ -29,9 +29,10 @@ import numpy as np
 import pandas as pd
 
 from mocopi import (
-    load_bvh,
+    load_mocopi_recording,
     estimate_camera_to_mocopi_offset,
 )
+from mocopi.features import NoCameraPoseDataError
 from mocopi.visualization import (
     prepare_camera_landmarks,
     draw_camera_skeleton,
@@ -48,7 +49,7 @@ def _infer_video_from_csv(csv_path: Path) -> Path:
         results/OutputVideos/deidentified_ND_1a_20140107_104046.avi
 
     Fallback if de-identified video is missing:
-        sample_data/ND_1a_20140107_104046.mp4
+        search under sample_data/ for a video with the same stem
     """
     stem = csv_path.stem
     if stem.startswith("landmarks_"):
@@ -56,12 +57,28 @@ def _infer_video_from_csv(csv_path: Path) -> Path:
     deid = Path("results") / "OutputVideos" / f"deidentified_{stem}.avi"
     if deid.is_file():
         return deid
-    return Path("sample_data") / f"{stem}.mp4"
+
+    legacy_path = Path("sample_data") / f"{stem}.mp4"
+    if legacy_path.is_file():
+        return legacy_path
+
+    sample_dir = Path("sample_data")
+    for candidate in sample_dir.rglob(f"{stem}.*"):
+        if candidate.suffix.lower() in {".mp4", ".avi", ".mov", ".m4v", ".mkv"}:
+            return candidate
+    return legacy_path
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render Mocopi vs camera side-by-side video.")
-    parser.add_argument("--bvh", type=Path, required=True, help="Path to Mocopi BVH file.")
+    parser.add_argument(
+        "--motion",
+        "--bvh",
+        dest="motion_source",
+        type=Path,
+        required=True,
+        help="Path to Mocopi motion source (.bvh, .bin, or session directory).",
+    )
     parser.add_argument(
         "--camera_csv",
         type=Path,
@@ -106,28 +123,33 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    bvh_path = args.bvh
+    motion_source = args.motion_source
     camera_csv_path = args.camera_csv
     video_path = args.video or _infer_video_from_csv(camera_csv_path)
     output_path = args.output
 
-    print(f"BVH:           {bvh_path}")
+    print(f"Motion source: {motion_source}")
     print(f"Camera CSV:    {camera_csv_path}")
     print(f"Video source:  {video_path}")
     print(f"Output video:  {output_path}")
 
     # Load data
-    seq = load_bvh(bvh_path)
+    seq = load_mocopi_recording(motion_source)
     cam_df = pd.read_csv(camera_csv_path)
 
     # Determine offset between Mocopi and camera timelines
-    offset_ms = estimate_camera_to_mocopi_offset(
-        seq,
-        cam_df,
-        search_ms=args.search_ms,
-        rate_hz=args.rate_hz,
-        offset_ms=args.offset_ms,
-    )
+    try:
+        offset_ms = estimate_camera_to_mocopi_offset(
+            seq,
+            cam_df,
+            search_ms=args.search_ms,
+            rate_hz=args.rate_hz,
+            offset_ms=args.offset_ms,
+        )
+    except NoCameraPoseDataError as exc:
+        raise SystemExit(
+            f"Camera CSV has no usable pose landmarks, so offset estimation cannot run: {camera_csv_path}"
+        ) from exc
 
     camera_by_frame = prepare_camera_landmarks(cam_df)
     t_m_ms, mocopi_positions = prepare_mocopi_positions(seq)

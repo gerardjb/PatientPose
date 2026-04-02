@@ -8,9 +8,11 @@ OutputPlots/*
 outputs/*
 outputs/
 results/*
+results/
 tmp/
 
-# TODO: add data storage location probably
+# build
+build/
 
 # Egg info
 *.egg-info/

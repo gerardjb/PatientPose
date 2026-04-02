@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 """
-Render a three-panel video for each A/ND/BVH triplet:
+Render a three-panel video for each A/ND/Mocopi triplet:
   - Left: unfiltered A_* video with pose overlay
   - Middle: ND_* video with pose overlay
   - Right: Mocopi skeleton (scaled to travel span)
-
-Assumes:
-  - Videos in sample_data/ND_pilot (A_* and ND_*).
-  - BVH in sample_data/ND_pilot/Re_ Mocopi with matching tag.
-  - Camera CSVs in results/OutputCSVs/landmarks_<stem>.csv.
 
 Example:
     python -m scripts.mocopi_triplet_video --tags 1a 1b
@@ -23,9 +18,10 @@ import cv2
 import numpy as np
 import pandas as pd
 
-from scripts.mocopi_pair_utils import discover_pairs
+from scripts.mocopi_pair_utils import discover_pairs, discover_sessions, parse_camera_role_specs
 from scripts.mocopi_pair_utils import TrialPair
-from mocopi import load_bvh, estimate_camera_to_mocopi_offset
+from mocopi import load_mocopi_recording, estimate_camera_to_mocopi_offset
+from mocopi.features import NoCameraPoseDataError
 from mocopi.visualization import (
     prepare_camera_landmarks,
     draw_camera_skeleton,
@@ -35,8 +31,14 @@ from mocopi.visualization import (
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Three-panel video for A/ND/BVH triplets.")
+    parser = argparse.ArgumentParser(description="Three-panel video for A/ND/Mocopi triplets.")
     parser.add_argument("--tags", nargs="+", help="Optional subset of tags to process (e.g., 1a 1b).")
+    parser.add_argument(
+        "--camera-role",
+        action="append",
+        default=None,
+        help="Session-mode camera mapping in the form CAMERA_ID=ROLE, where ROLE is A or ND.",
+    )
     parser.add_argument("--offset_ms", type=float, default=None, help="Optional fixed offset to reuse for both A and ND.")
     parser.add_argument("--search_ms", type=float, default=5000.0, help="Search range for offset estimation.")
     parser.add_argument("--rate_hz", type=float, default=50.0, help="Resample rate for offset estimation.")
@@ -50,12 +52,17 @@ def main() -> None:
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parent.parent
-    pairs = discover_pairs(base)
+    camera_roles = parse_camera_role_specs(args.camera_role)
+    pairs = discover_pairs(base, camera_roles=camera_roles)
     if args.tags:
         tags = set(args.tags)
         pairs = [p for p in pairs if p.tag in tags]
     if not pairs:
-        print("No matching ND/A/BVH pairs found under sample_data/ND_pilot.")
+        sessions = discover_sessions(base)
+        if sessions and not camera_roles:
+            print("Discovered session folders, but no session pairs were resolved. Add --camera-role CAMERA_ID=A and --camera-role CAMERA_ID=ND.")
+        else:
+            print("No matching Mocopi/camera pairs found.")
         return
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -69,20 +76,24 @@ def main() -> None:
             print(f"[{pair.tag}] Missing camera CSVs; skipping.")
             continue
 
-        seq = load_bvh(pair.bvh)
+        seq = load_mocopi_recording(pair.motion_source)
         nd_df = pd.read_csv(nd_csv)
         a_df = pd.read_csv(a_csv)
 
         if args.offset_ms is not None:
             offset_ms = args.offset_ms
         else:
-            offset_ms = estimate_camera_to_mocopi_offset(
-                seq,
-                nd_df,
-                args.search_ms,
-                args.rate_hz,
-                None,
-            )
+            try:
+                offset_ms = estimate_camera_to_mocopi_offset(
+                    seq,
+                    nd_df,
+                    args.search_ms,
+                    args.rate_hz,
+                    None,
+                )
+            except NoCameraPoseDataError:
+                print(f"[{pair.tag}] ND camera CSV has no usable pose landmarks; skipping triplet video.")
+                continue
             print(f"[{pair.tag}] Estimated offset {offset_ms:.1f} ms")
 
         # Prepare mocopi positions

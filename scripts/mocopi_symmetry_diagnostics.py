@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 Symmetry and mapping diagnostics for Mocopi vs MediaPipe egocentric trajectories.
 
-For each A/ND/BVH triplet under sample_data/ND_pilot, this script:
+For each A/ND/Mocopi triplet under sample_data, this script:
   - Aligns Mocopi and camera egocentric ΔY trajectories for feet and hands.
   - Computes same-side vs cross-side correlations (e.g., l_foot↔LEFT_ANKLE vs l_foot↔RIGHT_ANKLE).
   - Checks correlation sign for each mapping.
@@ -25,7 +25,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from mocopi.nd_pilot import discover_pairs
+from mocopi.nd_pilot import discover_pairs, discover_sessions, parse_camera_role_specs
+from mocopi.features import NoCameraPoseDataError
 from mocopi.reliability import (
     SCALE_REF_JOINTS,
     get_aligned_traces,
@@ -40,6 +41,12 @@ OUT_DIR = Path("results/mocopi_reliability/symmetry")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Symmetry diagnostics for Mocopi vs MediaPipe.")
     parser.add_argument("--tags", nargs="+", help="Optional subset of tags to process (e.g., 1a 1b).")
+    parser.add_argument(
+        "--camera-role",
+        action="append",
+        default=None,
+        help="Session-mode camera mapping in the form CAMERA_ID=ROLE, where ROLE is A or ND.",
+    )
     parser.add_argument(
         "--offset_ms",
         type=float,
@@ -165,12 +172,17 @@ def plot_feet(label: str, t_s: np.ndarray, mocopi_y: Dict[str, np.ndarray], came
 def main() -> None:
     args = parse_args()
     base = Path(__file__).resolve().parent.parent
-    pairs = discover_pairs(base)
+    camera_roles = parse_camera_role_specs(args.camera_role)
+    pairs = discover_pairs(base, camera_roles=camera_roles)
     if args.tags:
         tags = set(args.tags)
         pairs = [p for p in pairs if p.tag in tags]
     if not pairs:
-        print("No matching ND/A/BVH pairs found under sample_data/ND_pilot.")
+        sessions = discover_sessions(base)
+        if sessions and not camera_roles:
+            print("Discovered session folders, but no session pairs were resolved. Add --camera-role CAMERA_ID=A and --camera-role CAMERA_ID=ND.")
+        else:
+            print("No matching Mocopi/camera pairs found.")
         return
 
     for pair in pairs:
@@ -178,20 +190,24 @@ def main() -> None:
         nd_stem = pair.nd_video.stem
         nd_csv = Path("results/OutputCSVs") / f"landmarks_{nd_stem}.csv"
         if nd_csv.exists():
-            t_s, mocopi_y, camera_y, off_nd = get_aligned_traces(
-                pair.bvh,
-                nd_csv,
-                PAIR_JOINTS,
-                PAIR_LANDMARKS,
-                args.search_ms,
-                args.rate_hz,
-                args.offset_ms,
-                args.clip_start,
-                args.clip_end,
-            )
-            label = f"{pair.tag} ND"
-            report_correlations(label, t_s, mocopi_y, camera_y)
-            plot_feet(label, t_s, mocopi_y, camera_y)
+            try:
+                t_s, mocopi_y, camera_y, off_nd = get_aligned_traces(
+                    pair.motion_source,
+                    nd_csv,
+                    PAIR_JOINTS,
+                    PAIR_LANDMARKS,
+                    args.search_ms,
+                    args.rate_hz,
+                    args.offset_ms,
+                    args.clip_start,
+                    args.clip_end,
+                )
+            except NoCameraPoseDataError:
+                print(f"[{pair.tag}] ND camera CSV has no usable pose landmarks; skipping ND diagnostics.")
+            else:
+                label = f"{pair.tag} ND"
+                report_correlations(label, t_s, mocopi_y, camera_y)
+                plot_feet(label, t_s, mocopi_y, camera_y)
         else:
             print(f"[{pair.tag}] ND camera CSV {nd_csv} missing; skipping ND diagnostics.")
 
@@ -199,20 +215,24 @@ def main() -> None:
         a_stem = pair.unfiltered_video.stem
         a_csv = Path("results/OutputCSVs") / f"landmarks_{a_stem}.csv"
         if a_csv.exists():
-            t_s, mocopi_y, camera_y, off_a = get_aligned_traces(
-                pair.bvh,
-                a_csv,
-                PAIR_JOINTS,
-                PAIR_LANDMARKS,
-                args.search_ms,
-                args.rate_hz,
-                args.offset_ms,
-                args.clip_start,
-                args.clip_end,
-            )
-            label = f"{pair.tag} A"
-            report_correlations(label, t_s, mocopi_y, camera_y)
-            plot_feet(label, t_s, mocopi_y, camera_y)
+            try:
+                t_s, mocopi_y, camera_y, off_a = get_aligned_traces(
+                    pair.motion_source,
+                    a_csv,
+                    PAIR_JOINTS,
+                    PAIR_LANDMARKS,
+                    args.search_ms,
+                    args.rate_hz,
+                    args.offset_ms,
+                    args.clip_start,
+                    args.clip_end,
+                )
+            except NoCameraPoseDataError:
+                print(f"[{pair.tag}] A camera CSV has no usable pose landmarks; skipping A diagnostics.")
+            else:
+                label = f"{pair.tag} A"
+                report_correlations(label, t_s, mocopi_y, camera_y)
+                plot_feet(label, t_s, mocopi_y, camera_y)
         else:
             print(f"[{pair.tag}] A camera CSV {a_csv} missing; skipping A diagnostics.")
 

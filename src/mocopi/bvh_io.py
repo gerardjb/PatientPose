@@ -20,6 +20,8 @@ class MocopiSequence:
     parents: List[int]
     offsets: np.ndarray  # shape: (num_joints, 3)
     channel_starts: List[int]
+    timestamp_override_ms: np.ndarray | None = None
+    joint_position_overrides: Dict[str, np.ndarray] | None = None
 
     @property
     def num_frames(self) -> int:
@@ -31,6 +33,8 @@ class MocopiSequence:
 
     def timestamps_ms(self) -> np.ndarray:
         """Return timestamps in milliseconds for each frame."""
+        if self.timestamp_override_ms is not None:
+            return np.asarray(self.timestamp_override_ms, dtype=float)
         return np.arange(self.num_frames, dtype=float) * self.frame_time * 1000.0
 
     def joint_index(self, joint_name: str) -> int:
@@ -70,6 +74,8 @@ class MocopiSequence:
 
         It is intended for synchronization feature extraction rather than precise rendering.
         """
+        if self.joint_position_overrides and joint_name in self.joint_position_overrides:
+            return np.asarray(self.joint_position_overrides[joint_name], dtype=float)
         joint_idx = self.joint_index(joint_name)
         return _forward_kinematics_joint(self, joint_idx)
 

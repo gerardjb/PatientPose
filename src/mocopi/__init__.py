@@ -1,13 +1,14 @@
 """
-Lightweight utilities for working with Mocopi BVH motion capture data.
+Lightweight utilities for working with Mocopi motion capture data.
 
 This module focuses on:
-    - Parsing Mocopi-style BVH files into a structured time-series representation.
+    - Parsing Mocopi BVH files and session BIN recordings into a structured time-series representation.
     - Exporting joint trajectories in a landmarks-like tabular format.
     - Computing simple features for synchronizing with camera-based keypoints.
 """
 
 from .bvh_io import MocopiSequence, load_bvh, mocopi_to_frame_table
+from .recording_io import load_mocopi_bin, load_mocopi_recording, resolve_mocopi_source
 from .features import (
     MocopiFeatureConfig,
     CameraFeatureConfig,
@@ -15,7 +16,17 @@ from .features import (
     extract_camera_feature,
 )
 from .sync import estimate_time_offset, clean_feature_samples, estimate_camera_to_mocopi_offset
-from .nd_pilot import TrialPair, discover_pairs, pair_for_tag
+from .nd_pilot import (
+    CameraRecording,
+    CaptureSession,
+    TrialPair,
+    discover_pairs,
+    discover_sessions,
+    infer_camera_csv,
+    pair_for_tag,
+    parse_camera_role_specs,
+    resolve_session_pair,
+)
 from .reliability import (
     SCALE_REF_JOINTS,
     compute_body_scale_series,
@@ -44,6 +55,9 @@ from .plots import select_overlap_window, plot_egocentric_compare, plot_feet_cen
 __all__ = [
     "MocopiSequence",
     "load_bvh",
+    "load_mocopi_bin",
+    "load_mocopi_recording",
+    "resolve_mocopi_source",
     "mocopi_to_frame_table",
     "MocopiFeatureConfig",
     "CameraFeatureConfig",
@@ -52,9 +66,15 @@ __all__ = [
     "estimate_time_offset",
     "clean_feature_samples",
     "estimate_camera_to_mocopi_offset",
+    "CameraRecording",
+    "CaptureSession",
     "TrialPair",
     "discover_pairs",
+    "discover_sessions",
+    "infer_camera_csv",
     "pair_for_tag",
+    "parse_camera_role_specs",
+    "resolve_session_pair",
     "SCALE_REF_JOINTS",
     "compute_body_scale_series",
     "export_reliability_errors",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Plot egocentric trajectories for a tagged A/ND/BVH triplet on four axes:
+Plot egocentric trajectories for a tagged A/ND/Mocopi triplet on four axes:
   1) Mocopi egocentric ΔY for feet joints (defaults to l_foot/r_foot)
   2) Camera A (ND=0) egocentric ΔY for corresponding landmarks
   3) Camera ND egocentric ΔY for corresponding landmarks
@@ -27,15 +27,16 @@ import pandas as pd
 from matplotlib.ticker import MultipleLocator
 
 from mocopi import (
-    load_bvh,
+    load_mocopi_recording,
     nd_factor_from_stem,
     visibility_percent,
 )
 from mocopi.features import (
+    NoCameraPoseDataError,
     compute_egocentric_positions,
     compute_camera_egocentric_positions,
 )
-from mocopi.nd_pilot import discover_pairs
+from mocopi.nd_pilot import discover_pairs, discover_sessions, parse_camera_role_specs
 
 COLOR_MOCOPI = "#000000"
 COLOR_A = "#1d4f8a"  # brightened blue
@@ -50,6 +51,12 @@ def parse_args() -> argparse.Namespace:
         description="Four-panel egocentric plot for Mocopi vs camera A/ND (no temporal offset)."
     )
     parser.add_argument("--tag", required=True, help="Triplet tag to plot (e.g., 1a).")
+    parser.add_argument(
+        "--camera-role",
+        action="append",
+        default=None,
+        help="Session-mode camera mapping in the form CAMERA_ID=ROLE, where ROLE is A or ND.",
+    )
     parser.add_argument(
         "--joints",
         nargs="+",
@@ -117,14 +124,6 @@ def parse_args() -> argparse.Namespace:
         help="Output path for the PDF/PNG.",
     )
     return parser.parse_args()
-
-
-def _find_pair(base: Path, tag: str):
-    pairs = discover_pairs(base)
-    for p in pairs:
-        if p.tag == tag:
-            return p
-    raise SystemExit(f"Tag '{tag}' not found under sample_data/ND_pilot")
 
 
 def _plot_traces(
@@ -221,7 +220,13 @@ def main() -> None:
         args.output = default_output.with_name(f"fourpanel_{args.tag}.pdf")
 
     base = Path(__file__).resolve().parent.parent
-    pair = _find_pair(base, args.tag)
+    camera_roles = parse_camera_role_specs(args.camera_role)
+    pair = next((p for p in discover_pairs(base, camera_roles=camera_roles) if p.tag == args.tag), None)
+    if pair is None:
+        hint = ""
+        if discover_sessions(base) and not camera_roles:
+            hint = " Add --camera-role CAMERA_ID=A and --camera-role CAMERA_ID=ND for session data."
+        raise SystemExit(f"Tag '{args.tag}' not found in discovered Mocopi/camera pairs.{hint}")
 
     nd_csv = Path("results/OutputCSVs") / f"landmarks_{pair.nd_video.stem}.csv"
     a_csv = Path("results/OutputCSVs") / f"landmarks_{pair.unfiltered_video.stem}.csv"
@@ -229,18 +234,24 @@ def main() -> None:
         raise SystemExit(f"Missing camera CSVs for tag={args.tag} (ND: {nd_csv}, A: {a_csv})")
 
     # Mocopi egocentric
-    seq = load_bvh(pair.bvh)
+    seq = load_mocopi_recording(pair.motion_source)
     t_m_ms, mocopi_pos = compute_egocentric_positions(seq, args.joints)
 
     # Camera egocentric
     nd_df = pd.read_csv(nd_csv)
     a_df = pd.read_csv(a_csv)
-    t_nd_ms, nd_pos = compute_camera_egocentric_positions(
-        nd_df, args.landmarks, visibility_threshold=args.visibility_threshold
-    )
-    t_a_ms, a_pos = compute_camera_egocentric_positions(
-        a_df, args.landmarks, visibility_threshold=args.visibility_threshold
-    )
+    try:
+        t_nd_ms, nd_pos = compute_camera_egocentric_positions(
+            nd_df, args.landmarks, visibility_threshold=args.visibility_threshold
+        )
+    except NoCameraPoseDataError as exc:
+        raise SystemExit(f"ND camera CSV has no usable pose landmarks: {nd_csv}") from exc
+    try:
+        t_a_ms, a_pos = compute_camera_egocentric_positions(
+            a_df, args.landmarks, visibility_threshold=args.visibility_threshold
+        )
+    except NoCameraPoseDataError as exc:
+        raise SystemExit(f"A camera CSV has no usable pose landmarks: {a_csv}") from exc
     if args.offset_ms:
         t_nd_ms = t_nd_ms + args.offset_ms
         t_a_ms = t_a_ms + args.offset_ms

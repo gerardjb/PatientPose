@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 Generate per-pair Mocopi vs MediaPipe reliability plots and a delta summary.
 
-For each ND/A/BVH triplet discovered under sample_data/ND_pilot, this script:
+For each ND/A/Mocopi triplet discovered under sample_data, this script:
   - Ensures a reliability CSV exists for the ND and A recordings (runs mocopi_reliability_export if missing).
   - Finds the joint with the highest |corr| between Mocopi and the A (unfiltered) camera trace.
   - Plots Mocopi vs A vs ND egocentric ΔY over time for that joint, plus visibility (if available) for A and ND.
@@ -23,8 +23,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from mocopi.nd_pilot import TrialPair, discover_pairs
+from mocopi.nd_pilot import TrialPair, discover_pairs, discover_sessions, parse_camera_role_specs
 from mocopi.reliability import (
+    RELIABILITY_COLUMNS,
     nd_factor_from_stem,
     ensure_reliability_csv,
     best_joint_from_reliability,
@@ -115,6 +116,12 @@ def plot_pair(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Per-pair reliability plots and ND-A delta summary.")
     parser.add_argument("--tags", nargs="+", help="Optional subset of tags to process (e.g., 1a 1b).")
+    parser.add_argument(
+        "--camera-role",
+        action="append",
+        default=None,
+        help="Session-mode camera mapping in the form CAMERA_ID=ROLE, where ROLE is A or ND.",
+    )
     parser.add_argument("--offset_ms", type=float, default=None, help="Optional fixed offset to reuse for both A and ND.")
     parser.add_argument("--search_ms", type=float, default=5000.0, help="Search range for offset estimation.")
     parser.add_argument("--rate_hz", type=float, default=50.0, help="Resample rate for offset estimation.")
@@ -133,12 +140,17 @@ def main() -> None:
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parent.parent
-    pairs = discover_pairs(base)
+    camera_roles = parse_camera_role_specs(args.camera_role)
+    pairs = discover_pairs(base, camera_roles=camera_roles)
     if args.tags:
         tags = set(args.tags)
         pairs = [p for p in pairs if p.tag in tags]
     if not pairs:
-        print("No matching ND/A/BVH pairs found under sample_data/ND_pilot.")
+        sessions = discover_sessions(base)
+        if sessions and not camera_roles:
+            print("Discovered session folders, but no session pairs were resolved. Add --camera-role CAMERA_ID=A and --camera-role CAMERA_ID=ND.")
+        else:
+            print("No matching Mocopi/camera pairs found.")
         return
 
     summary_records = []
@@ -157,7 +169,7 @@ def main() -> None:
             continue
 
         ensure_reliability_csv(
-            pair.bvh,
+            pair.motion_source,
             nd_camera_csv,
             nd_output,
             args.offset_ms,
@@ -167,7 +179,7 @@ def main() -> None:
             clip_end_s=args.clip_end,
         )
         ensure_reliability_csv(
-            pair.bvh,
+            pair.motion_source,
             a_camera_csv,
             a_output,
             args.offset_ms,
@@ -184,6 +196,16 @@ def main() -> None:
         # Load reliability CSVs
         nd_df = pd.read_csv(nd_output)
         a_df = pd.read_csv(a_output)
+        if (list(nd_df.columns) == RELIABILITY_COLUMNS and nd_df.empty) or (
+            list(a_df.columns) == RELIABILITY_COLUMNS and a_df.empty
+        ):
+            missing = []
+            if list(nd_df.columns) == RELIABILITY_COLUMNS and nd_df.empty:
+                missing.append("ND")
+            if list(a_df.columns) == RELIABILITY_COLUMNS and a_df.empty:
+                missing.append("A")
+            print(f"[{pair.tag}] No usable pose landmarks for {', '.join(missing)} camera CSV; skipping pair report.")
+            continue
 
         # Median errors per joint
         med_nd = nd_df.groupby("joint")["error_2d"].median()

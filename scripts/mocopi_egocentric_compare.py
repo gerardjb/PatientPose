@@ -3,7 +3,7 @@ from __future__ import annotations
 """
 Compare Mocopi and camera (MediaPipe) joint trajectories in an egocentric frame.
 
-For a given BVH file and its corresponding camera landmarks CSV, this script:
+For a given Mocopi motion source and its corresponding camera landmarks CSV, this script:
     - Computes a simple COM-centered (egocentric) frame for Mocopi joints.
     - Computes an analogous COM-centered frame for camera pose landmarks.
     - Aligns the two time series using a specified or estimated offset.
@@ -14,7 +14,7 @@ what the camera sees?”, independent of where the subject is in the room.
 
 Example:
     python -m scripts.mocopi_egocentric_compare \\
-        --bvh sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \\
+        --motion sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \\
         --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv \\
         --output results/mocopi_camera_egocentric_ND_1a.png
 """
@@ -27,10 +27,11 @@ import numpy as np
 import pandas as pd
 
 from mocopi import (
-    load_bvh,
+    load_mocopi_recording,
     estimate_camera_to_mocopi_offset,
 )
 from mocopi.features import (
+    NoCameraPoseDataError,
     compute_egocentric_positions,
     compute_camera_egocentric_positions,
 )
@@ -41,7 +42,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Plot Mocopi and camera joint trajectories in an egocentric frame."
     )
-    parser.add_argument("--bvh", type=Path, required=True, help="Path to Mocopi BVH file.")
+    parser.add_argument(
+        "--motion",
+        "--bvh",
+        dest="motion_source",
+        type=Path,
+        required=True,
+        help="Path to Mocopi motion source (.bvh, .bin, or session directory).",
+    )
     parser.add_argument(
         "--camera_csv",
         type=Path,
@@ -114,23 +122,33 @@ def main() -> None:
     if len(args.joints) != len(args.landmarks):
         raise SystemExit("Expected --joints and --landmarks to have the same length")
 
-    seq = load_bvh(args.bvh)
+    seq = load_mocopi_recording(args.motion_source)
     cam_df = pd.read_csv(args.camera_csv)
 
     # Egocentric Mocopi positions
     t_m_ms, mocopi_pos = compute_egocentric_positions(seq, args.joints)
 
     # Egocentric camera positions
-    t_c_ms_raw, camera_pos = compute_camera_egocentric_positions(cam_df, args.landmarks)
+    try:
+        t_c_ms_raw, camera_pos = compute_camera_egocentric_positions(cam_df, args.landmarks)
+    except NoCameraPoseDataError as exc:
+        raise SystemExit(
+            f"Camera CSV has no usable pose landmarks for egocentric comparison: {args.camera_csv}"
+        ) from exc
 
     # Determine or use offset
-    offset_ms = estimate_camera_to_mocopi_offset(
-        seq,
-        cam_df,
-        args.search_ms,
-        args.rate_hz,
-        args.offset_ms,
-    )
+    try:
+        offset_ms = estimate_camera_to_mocopi_offset(
+            seq,
+            cam_df,
+            args.search_ms,
+            args.rate_hz,
+            args.offset_ms,
+        )
+    except NoCameraPoseDataError as exc:
+        raise SystemExit(
+            f"Camera CSV has no usable pose landmarks for offset estimation: {args.camera_csv}"
+        ) from exc
     t_c_ms_aligned = t_c_ms_raw + offset_ms
 
     # Determine overlapping time window in aligned seconds
