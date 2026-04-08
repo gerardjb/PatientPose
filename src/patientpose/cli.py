@@ -14,6 +14,7 @@ from patientpose.pipeline.preprocess import (
     run_preprocess_quality_video,
     run_preprocess_video,
 )
+from patientpose.pipeline.rendering import add_side_by_side_args, run_side_by_side
 from patientpose.pipeline.reporting import add_pair_report_args, run_pair_report
 
 
@@ -76,6 +77,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_pair_report_args(report_pair_parser)
     report_pair_parser.set_defaults(handler=run_pair_report)
+
+    render_parser = subparsers.add_parser(
+        "render",
+        help="Render visualization outputs from processed artifacts.",
+    )
+    render_subparsers = render_parser.add_subparsers(dest="render_command", required=True)
+
+    render_side_by_side_parser = render_subparsers.add_parser(
+        "side-by-side",
+        help="Render a camera-vs-mocopi side-by-side video.",
+    )
+    add_side_by_side_args(render_side_by_side_parser)
+    render_side_by_side_parser.set_defaults(handler=run_side_by_side)
 
     return parser
 

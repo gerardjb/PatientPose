@@ -31,6 +31,11 @@ class PairReportArtifacts:
     ratio_plot: Path
 
 
+@dataclass(frozen=True)
+class SideBySideArtifacts:
+    output_video: Path
+
+
 class ArtifactStore:
     def __init__(self, paths: ProjectPaths) -> None:
         self.paths = paths
@@ -67,4 +72,9 @@ class ArtifactStore:
             plot_dir=output_dir / "plots",
             summary_csv=output_dir / "nd_delta_summary.csv",
             ratio_plot=output_dir / "nd_ratio_summary.pdf",
+        )
+
+    def side_by_side(self) -> SideBySideArtifacts:
+        return SideBySideArtifacts(
+            output_video=self.paths.output_videos / "mocopi_vs_camera.avi",
         )

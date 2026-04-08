@@ -131,6 +131,41 @@ def prepare_mocopi_positions(seq, joints: List[str] | None = None) -> Tuple[np.n
     else:
         walk_min, walk_max = x_min, x_max
     joint_positions["_walk_range"] = np.array([[walk_min, walk_max]], dtype=float)
+
+    center_name = None
+    if "torso_7" in joint_positions:
+        center_name = "torso_7"
+    elif "root" in joint_positions:
+        center_name = "root"
+    else:
+        for joint_name in joints:
+            if joint_name in joint_positions:
+                center_name = joint_name
+                break
+
+    if center_name is not None:
+        center_pos = joint_positions[center_name]
+        centered_xs = []
+        centered_ys = []
+        for joint_name in joints:
+            pos = joint_positions.get(joint_name)
+            if pos is None:
+                continue
+            frame_count = min(pos.shape[0], center_pos.shape[0])
+            if frame_count <= 0:
+                continue
+            centered_xs.append(pos[:frame_count, 0] - center_pos[:frame_count, 0])
+            centered_ys.append(pos[:frame_count, 1] - center_pos[:frame_count, 1])
+
+        if centered_xs and centered_ys:
+            max_abs_x = max(float(np.abs(np.concatenate(centered_xs)).max()), 1.0)
+            max_abs_y = max(float(np.abs(np.concatenate(centered_ys)).max()), 1.0)
+        else:
+            max_abs_x = max_abs_y = 1.0
+
+        joint_positions["_center_joint_name"] = center_name
+        joint_positions["_centered_limits"] = np.array([[max_abs_x, max_abs_y]], dtype=float)
+
     return timestamps_ms, joint_positions
 
 
@@ -139,6 +174,8 @@ def draw_mocopi_skeleton(
     joints_positions: Dict[str, np.ndarray],
     t_mocopi_ms: float,
     timestamps_ms: np.ndarray,
+    *,
+    view: str = "walk-range",
 ) -> None:
     h, w = canvas.shape[:2]
     extents = joints_positions.get("_extents")
@@ -154,10 +191,18 @@ def draw_mocopi_skeleton(
         return
 
     idx = int(np.searchsorted(timestamps_ms, t_mocopi_ms))
-    if idx <= 0 or idx >= len(timestamps_ms):
+    if idx >= len(timestamps_ms):
         return
+    if idx < 0:
+        idx = 0
 
     pts: Dict[str, Tuple[int, int]] = {}
+    center_joint_name = joints_positions.get("_center_joint_name")
+    centered_limits = joints_positions.get("_centered_limits")
+    center_pos = None
+    if isinstance(center_joint_name, str):
+        center_pos = joints_positions.get(center_joint_name)
+
     for name in MOCOPI_JOINTS:
         if name not in joints_positions:
             continue
@@ -165,10 +210,19 @@ def draw_mocopi_skeleton(
         if idx >= pos.shape[0]:
             continue
         x, y = float(pos[idx, 0]), float(pos[idx, 1])
-        xn = (x - walk_min) / (walk_max - walk_min + 1e-6)
+
+        if view == "body-centered" and center_pos is not None and centered_limits is not None and idx < center_pos.shape[0]:
+            x_limit, y_limit = centered_limits[0]
+            center_x = float(center_pos[idx, 0])
+            center_y = float(center_pos[idx, 1])
+            xn = 0.5 + 0.5 * ((x - center_x) / (x_limit + 1e-6))
+            yn = 0.5 - 0.5 * ((y - center_y) / (y_limit + 1e-6))
+        else:
+            xn = (x - walk_min) / (walk_max - walk_min + 1e-6)
+            yn = 1.0 - ((y - y_min) / (y_max - y_min + 1e-6))
+
         xn = float(np.clip(xn, 0.0, 1.0))
-        yn = (y - y_min) / (y_max - y_min + 1e-6)
-        yn = 1.0 - yn
+        yn = float(np.clip(yn, 0.0, 1.0))
         cx = int(xn * (w * 0.8) + w * 0.1)
         cy = int(yn * (h * 0.8) + h * 0.1)
         pts[name] = (cx, cy)
