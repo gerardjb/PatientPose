@@ -14,6 +14,7 @@ from patientpose.pipeline.preprocess import (
     run_preprocess_quality_video,
     run_preprocess_video,
 )
+from patientpose.pipeline.reporting import add_pair_report_args, run_pair_report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,6 +63,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_reliability_batch_args(analyze_reliability_batch_parser)
     analyze_reliability_batch_parser.set_defaults(handler=run_reliability_batch)
+
+    report_parser = subparsers.add_parser(
+        "report",
+        help="Generate summary reports and plots.",
+    )
+    report_subparsers = report_parser.add_subparsers(dest="report_command", required=True)
+
+    report_pair_parser = report_subparsers.add_parser(
+        "pair-report",
+        help="Generate per-pair reliability plots and ND-A summary outputs.",
+    )
+    add_pair_report_args(report_pair_parser)
+    report_pair_parser.set_defaults(handler=run_pair_report)
 
     return parser
 

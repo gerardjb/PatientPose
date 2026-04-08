@@ -23,6 +23,14 @@ class QualityVideoArtifacts:
     quality_plot: Path
 
 
+@dataclass(frozen=True)
+class PairReportArtifacts:
+    output_dir: Path
+    plot_dir: Path
+    summary_csv: Path
+    ratio_plot: Path
+
+
 class ArtifactStore:
     def __init__(self, paths: ProjectPaths) -> None:
         self.paths = paths
@@ -50,4 +58,13 @@ class ArtifactStore:
             landmarks_csv=self.paths.output_csvs / f"landmarks_{stem}.csv",
             position_plot=self.paths.output_plots / f"fingertip_position_{stem}.png",
             quality_plot=self.paths.output_plots / f"fingertip_quality_{stem}.png",
+        )
+
+    def pair_report(self) -> PairReportArtifacts:
+        output_dir = self.paths.results / "mocopi_reliability"
+        return PairReportArtifacts(
+            output_dir=output_dir,
+            plot_dir=output_dir / "plots",
+            summary_csv=output_dir / "nd_delta_summary.csv",
+            ratio_plot=output_dir / "nd_ratio_summary.pdf",
         )
