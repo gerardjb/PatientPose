@@ -3,13 +3,27 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Sequence
 
 import cv2
+import matplotlib
 import numpy as np
 import pandas as pd
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
 
-from mocopi import estimate_camera_to_mocopi_offset, load_mocopi_recording
-from mocopi.features import NoCameraPoseDataError
+from mocopi import (
+    estimate_camera_to_mocopi_offset,
+    load_mocopi_recording,
+    nd_factor_from_stem,
+    visibility_percent,
+)
+from mocopi.features import (
+    NoCameraPoseDataError,
+    compute_camera_egocentric_positions,
+    compute_egocentric_positions,
+)
 from mocopi.visualization import (
     draw_camera_skeleton,
     draw_mocopi_skeleton,
@@ -18,6 +32,7 @@ from mocopi.visualization import (
 )
 from patientpose.artifacts import ArtifactStore
 from patientpose.config import resolve_project_paths
+from patientpose.datasets import discover_pairs, discover_sessions, infer_camera_csv, parse_camera_role_specs
 from video_tools import determine_rotation_code, rotate_frame
 
 
@@ -38,6 +53,13 @@ PROCESSED_VIDEO_PREFIXES = (
 )
 PANEL_CAMERA_COLOR = (72, 214, 118)
 PANEL_MOCOPI_COLOR = (65, 189, 255)
+PANEL_A_COLOR = (72, 214, 118)
+PANEL_ND_COLOR = (54, 151, 255)
+COLOR_MOCOPI = "#000000"
+COLOR_A = "#1d4f8a"
+COLOR_ND = "#ff00ff"
+DEFAULT_FOURPANEL_JOINTS = ["l_foot", "r_foot"]
+DEFAULT_FOURPANEL_LANDMARKS = ["LEFT_ANKLE", "RIGHT_ANKLE"]
 
 
 def add_side_by_side_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -130,9 +152,144 @@ def add_side_by_side_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
     return parser
 
 
+def add_triplet_video_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="PatientPose repo root. Defaults to the nearest parent containing pyproject.toml.",
+    )
+    parser.add_argument("--tags", nargs="+", help="Optional subset of tags to process.")
+    parser.add_argument(
+        "--camera-role",
+        action="append",
+        default=None,
+        help="Session-mode camera mapping in the form CAMERA_ID=ROLE, where ROLE is A or ND.",
+    )
+    parser.add_argument(
+        "--camera-panel-source",
+        choices=("auto", "deidentified", "deidentified-no-keypoints", "raw"),
+        default="auto",
+        help="What to show for the A/ND camera panels. 'auto' prefers deidentified, then deidentified-no-keypoints, then raw.",
+    )
+    parser.add_argument(
+        "--offset_ms",
+        type=float,
+        default=None,
+        help="Optional fixed offset to reuse for both A and ND.",
+    )
+    parser.add_argument("--search_ms", type=float, default=5000.0, help="Search range for offset estimation.")
+    parser.add_argument("--rate_hz", type=float, default=50.0, help="Resampling rate for offset estimation.")
+    parser.add_argument(
+        "--output-dir",
+        "--output_dir",
+        type=Path,
+        default=None,
+        help="Directory for triplet videos. Defaults to <project-root>/results/OutputVideos/triplets.",
+    )
+    parser.add_argument(
+        "--max_frames",
+        type=int,
+        default=None,
+        help="Optional maximum number of frames to render per triplet.",
+    )
+    parser.add_argument(
+        "--video-rotation",
+        choices=tuple(VIDEO_ROTATION_CHOICES.keys()),
+        default="auto",
+        help="Rotation to apply to raw camera panel videos before drawing overlays.",
+    )
+    parser.add_argument(
+        "--orientation-max-scan",
+        type=int,
+        default=None,
+        help="Maximum number of frames to scan when --video-rotation=auto.",
+    )
+    parser.add_argument(
+        "--mocopi-view",
+        choices=("body-centered", "walk-range"),
+        default="body-centered",
+        help="How to frame the Mocopi panel.",
+    )
+    return parser
+
+
+def add_fourpanel_triplet_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="PatientPose repo root. Defaults to the nearest parent containing pyproject.toml.",
+    )
+    parser.add_argument("--tag", required=True, help="Triplet tag to plot.")
+    parser.add_argument(
+        "--camera-role",
+        action="append",
+        default=None,
+        help="Session-mode camera mapping in the form CAMERA_ID=ROLE, where ROLE is A or ND.",
+    )
+    parser.add_argument(
+        "--joints",
+        nargs="+",
+        default=DEFAULT_FOURPANEL_JOINTS,
+        help="Mocopi joint names to plot.",
+    )
+    parser.add_argument(
+        "--landmarks",
+        nargs="+",
+        default=DEFAULT_FOURPANEL_LANDMARKS,
+        help="Camera pose landmarks to plot in the same order.",
+    )
+    parser.add_argument(
+        "--visibility-threshold",
+        type=float,
+        default=0.8,
+        help="Visibility threshold for camera landmarks.",
+    )
+    parser.add_argument(
+        "--offset-ms",
+        type=float,
+        default=0.0,
+        help="Optional camera-to-mocopi offset (ms) to apply before plotting.",
+    )
+    parser.add_argument("--x-min", type=float, default=None, help="Optional minimum time (s) for all x-axes.")
+    parser.add_argument("--x-max", type=float, default=None, help="Optional maximum time (s) for all x-axes.")
+    parser.add_argument("--y-dy-min", type=float, default=None, help="Optional minimum dY for motion panels.")
+    parser.add_argument("--y-dy-max", type=float, default=None, help="Optional maximum dY for motion panels.")
+    parser.add_argument(
+        "--y-count-min",
+        type=float,
+        default=None,
+        help="Optional minimum for the visibility-count panel.",
+    )
+    parser.add_argument(
+        "--y-count-max",
+        type=float,
+        default=None,
+        help="Optional maximum for the visibility-count panel.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional output path for the PDF plot.",
+    )
+    return parser
+
+
 def build_side_by_side_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Render Mocopi vs camera side-by-side video.")
     return add_side_by_side_args(parser)
+
+
+def build_triplet_video_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Render three-panel A/ND/Mocopi triplet videos.")
+    return add_triplet_video_args(parser)
+
+
+def build_fourpanel_triplet_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Render four-panel egocentric plots for a triplet.")
+    return add_fourpanel_triplet_args(parser)
 
 
 def _resolve_cli_path(path: Path, project_root: Path) -> Path:
@@ -275,6 +432,127 @@ def _resolve_camera_panel_video(
         return processed_video, panel_source
 
     return _infer_raw_video_from_csv(camera_csv_path, project_root, metadata), "raw"
+
+
+def _camera_csv_for_video(video_path: Path, project_root: Path) -> Path:
+    return (project_root / infer_camera_csv(video_path)).resolve()
+
+
+def _resolve_pairs_for_render(
+    *,
+    project_root: Path,
+    tags: Sequence[str] | None,
+    camera_role_specs: Sequence[str] | None,
+) -> list:
+    camera_roles = parse_camera_role_specs(camera_role_specs)
+    pairs = discover_pairs(project_root, camera_roles=camera_roles)
+    if tags:
+        tag_set = set(tags)
+        pairs = [pair for pair in pairs if pair.tag in tag_set]
+    if not pairs:
+        sessions = discover_sessions(project_root)
+        if sessions and not camera_roles:
+            print(
+                "Discovered session folders, but no session pairs were resolved. "
+                "Add --camera-role CAMERA_ID=A and --camera-role CAMERA_ID=ND."
+            )
+        else:
+            print("No matching Mocopi/camera pairs found.")
+    return pairs
+
+
+def _rotated_video_size(width: int, height: int, rotation_code: int | None) -> tuple[int, int]:
+    if rotation_code in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
+        return height, width
+    return width, height
+
+
+def _resize_to_height(frame: np.ndarray, target_height: int) -> np.ndarray:
+    src_h, src_w = frame.shape[:2]
+    if src_h == target_height:
+        return frame
+    scale = target_height / max(src_h, 1)
+    target_width = max(1, int(round(src_w * scale)))
+    return cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+
+
+def _fourpanel_auto_ylim_from_window(
+    t_ms: np.ndarray,
+    traces: dict[str, np.ndarray],
+    xlim: tuple[float, float],
+    padding: float = 0.05,
+) -> tuple[float, float] | None:
+    t_s = t_ms / 1000.0
+    mask = (t_s >= xlim[0]) & (t_s <= xlim[1])
+    if not np.any(mask):
+        return None
+    ys: list[float] = []
+    for arr in traces.values():
+        if arr is None or arr.shape[0] != t_s.shape[0]:
+            continue
+        y_vals = arr[:, 1][mask]
+        y_vals = y_vals[np.isfinite(y_vals)]
+        if y_vals.size:
+            ys.append(float(np.min(y_vals)))
+            ys.append(float(np.max(y_vals)))
+    if not ys:
+        return None
+    y_min = min(ys)
+    y_max = max(ys)
+    if y_max == y_min:
+        y_pad = max(1e-3, abs(y_max) * padding)
+        return y_min - y_pad, y_max + y_pad
+    span = y_max - y_min
+    pad = span * padding
+    return y_min - pad, y_max + pad
+
+
+def _ensure_percent_trace(
+    t_ms: np.ndarray,
+    perc: np.ndarray,
+    xlim: tuple[float, float],
+) -> tuple[np.ndarray, np.ndarray]:
+    if t_ms is None or perc is None or len(t_ms) == 0 or len(perc) == 0:
+        t_fill = np.array([xlim[0] * 1000.0, xlim[1] * 1000.0], dtype=float)
+        p_fill = np.zeros_like(t_fill, dtype=float)
+        return t_fill, p_fill
+    if np.all(~np.isfinite(perc)):
+        t_fill = np.array([xlim[0] * 1000.0, xlim[1] * 1000.0], dtype=float)
+        p_fill = np.zeros_like(t_fill, dtype=float)
+        return t_fill, p_fill
+    return t_ms, perc
+
+
+def _plot_fourpanel_traces(
+    ax,
+    t_ms: np.ndarray,
+    traces: dict[str, np.ndarray],
+    label_text: str,
+    xlim: tuple[float, float],
+    label_color: str,
+) -> None:
+    t_s = t_ms / 1000.0
+    for name, arr in traces.items():
+        if arr is None or arr.shape[0] != t_s.shape[0]:
+            continue
+        is_right = name.lower().startswith("r_") or name.lower().startswith("right")
+        linestyle = "--" if is_right else "-"
+        ax.plot(t_s, arr[:, 1], label=name, color=COLOR_MOCOPI, linestyle=linestyle)
+    ax.set_ylabel(
+        label_text,
+        color=label_color,
+        fontsize=12,
+        rotation=0,
+        ha="right",
+        va="top",
+        labelpad=20,
+    )
+    ax.grid(False)
+    ax.xaxis.set_major_locator(MultipleLocator(1.0))
+    ax.set_xlim(xlim)
+    ax.tick_params(left=False, labelleft=False, bottom=False, labelbottom=False)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
 
 
 def _is_processed_video(video_path: Path) -> bool:
@@ -550,7 +828,393 @@ def run_side_by_side(args: argparse.Namespace) -> None:
     print("Done.")
 
 
+def run_triplet_video(args: argparse.Namespace) -> None:
+    paths = resolve_project_paths(args.project_root)
+    artifact_store = ArtifactStore(paths)
+    artifact_store.ensure_standard_dirs()
+
+    pairs = _resolve_pairs_for_render(
+        project_root=paths.root,
+        tags=args.tags,
+        camera_role_specs=args.camera_role,
+    )
+    if not pairs:
+        return
+
+    for pair in pairs:
+        nd_camera_csv = _camera_csv_for_video(pair.nd_video, paths.root)
+        a_camera_csv = _camera_csv_for_video(pair.unfiltered_video, paths.root)
+        if not nd_camera_csv.exists() or not a_camera_csv.exists():
+            print(f"[{pair.tag}] Missing camera CSVs; skipping.")
+            continue
+
+        seq = load_mocopi_recording(pair.motion_source)
+        nd_df = pd.read_csv(nd_camera_csv)
+        a_df = pd.read_csv(a_camera_csv)
+
+        if args.offset_ms is not None:
+            offset_ms = args.offset_ms
+        else:
+            try:
+                offset_ms = estimate_camera_to_mocopi_offset(
+                    seq,
+                    nd_df,
+                    args.search_ms,
+                    args.rate_hz,
+                    None,
+                )
+            except NoCameraPoseDataError:
+                print(f"[{pair.tag}] ND camera CSV has no usable pose landmarks; skipping triplet video.")
+                continue
+            print(f"[{pair.tag}] Estimated offset {offset_ms:.1f} ms")
+
+        t_m_ms, mocopi_positions = prepare_mocopi_positions(seq)
+        nd_landmarks = prepare_camera_landmarks(nd_df)
+        a_landmarks = prepare_camera_landmarks(a_df)
+
+        explicit_output_dir = _resolve_cli_path(args.output_dir, paths.root) if args.output_dir is not None else None
+        artifacts = artifact_store.triplet_video(pair.tag)
+        output_dir = explicit_output_dir if explicit_output_dir is not None else artifacts.output_dir
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"triplet_{pair.tag}.avi"
+
+        a_video_path, a_source = _resolve_camera_panel_video(
+            camera_csv_path=a_camera_csv,
+            explicit_video_path=None,
+            project_root=paths.root,
+            panel_source=args.camera_panel_source,
+        )
+        nd_video_path, nd_source = _resolve_camera_panel_video(
+            camera_csv_path=nd_camera_csv,
+            explicit_video_path=None,
+            project_root=paths.root,
+            panel_source=args.camera_panel_source,
+        )
+
+        a_rotation_code, a_rotation_source = _resolve_video_rotation_code(
+            a_video_path,
+            a_camera_csv,
+            paths,
+            args.video_rotation,
+            args.orientation_max_scan,
+        )
+        nd_rotation_code, nd_rotation_source = _resolve_video_rotation_code(
+            nd_video_path,
+            nd_camera_csv,
+            paths,
+            args.video_rotation,
+            args.orientation_max_scan,
+        )
+
+        cap_a = cv2.VideoCapture(str(a_video_path))
+        cap_nd = cv2.VideoCapture(str(nd_video_path))
+        if not cap_a.isOpened() or not cap_nd.isOpened():
+            print(f"[{pair.tag}] Could not open camera panel videos; skipping.")
+            cap_a.release()
+            cap_nd.release()
+            continue
+
+        raw_width_a = int(cap_a.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+        raw_height_a = int(cap_a.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+        raw_width_nd = int(cap_nd.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+        raw_height_nd = int(cap_nd.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+        width_a, height_a = _rotated_video_size(raw_width_a, raw_height_a, a_rotation_code)
+        width_nd, height_nd = _rotated_video_size(raw_width_nd, raw_height_nd, nd_rotation_code)
+
+        fps = cap_nd.get(cv2.CAP_PROP_FPS) or cap_a.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_count = int(cap_nd.get(cv2.CAP_PROP_FRAME_COUNT)) or len(nd_landmarks)
+        frame_count = min(frame_count, int(cap_a.get(cv2.CAP_PROP_FRAME_COUNT)) or frame_count)
+        if args.max_frames is not None:
+            frame_count = min(frame_count, args.max_frames)
+
+        panel_height = max(height_a, height_nd)
+        panel_width_a = max(1, int(round(width_a * (panel_height / max(height_a, 1)))))
+        panel_width_nd = max(1, int(round(width_nd * (panel_height / max(height_nd, 1)))))
+        mocopi_width = max(panel_width_a, panel_width_nd)
+        out_w = panel_width_a + panel_width_nd + mocopi_width
+        out_h = panel_height
+
+        fourcc = cv2.VideoWriter_fourcc(*"XVID")
+        out = cv2.VideoWriter(str(output_path), fourcc, fps, (out_w, out_h))
+        if not out.isOpened():
+            print(f"[{pair.tag}] Could not open writer; skipping.")
+            cap_a.release()
+            cap_nd.release()
+            continue
+
+        print(f"[{pair.tag}] A panel: {a_video_path} ({a_source}, {_rotation_label(a_rotation_code)} / {a_rotation_source})")
+        print(f"[{pair.tag}] ND panel: {nd_video_path} ({nd_source}, {_rotation_label(nd_rotation_code)} / {nd_rotation_source})")
+        print(f"[{pair.tag}] Rendering {frame_count} frames to {output_path}")
+
+        draw_overlay_a = not _is_processed_video(a_video_path)
+        draw_overlay_nd = not _is_processed_video(nd_video_path)
+
+        for frame_idx in range(frame_count):
+            ret_a, frame_a = cap_a.read()
+            ret_nd, frame_nd = cap_nd.read()
+            if not ret_a or not ret_nd:
+                break
+
+            frame_a = rotate_frame(frame_a, a_rotation_code)
+            frame_nd = rotate_frame(frame_nd, nd_rotation_code)
+
+            left = frame_a.copy()
+            middle = frame_nd.copy()
+            lms_a = a_landmarks.get(frame_idx)
+            lms_nd = nd_landmarks.get(frame_idx)
+            if lms_a and draw_overlay_a:
+                draw_camera_skeleton(left, lms_a)
+            if lms_nd and draw_overlay_nd:
+                draw_camera_skeleton(middle, lms_nd)
+
+            t_cam_ms = _timestamp_for_frame(nd_df, frame_idx, lms_nd, fps)
+            t_mocopi_ms = t_cam_ms + offset_ms
+
+            right = np.zeros((panel_height, mocopi_width, 3), dtype=np.uint8)
+            draw_mocopi_skeleton(right, mocopi_positions, t_mocopi_ms, t_m_ms, view=args.mocopi_view)
+
+            left_resized = _resize_to_height(left, panel_height)
+            middle_resized = _resize_to_height(middle, panel_height)
+
+            left_subtitle = f"t={t_cam_ms / 1000.0:0.2f}s | {a_source}"
+            nd_subtitle = f"t={t_cam_ms / 1000.0:0.2f}s | {nd_source}"
+            _draw_panel_chrome(
+                left_resized,
+                title="Camera A",
+                subtitle=left_subtitle,
+                accent_color=PANEL_A_COLOR,
+            )
+            _draw_panel_chrome(
+                middle_resized,
+                title="Camera ND",
+                subtitle=nd_subtitle,
+                accent_color=PANEL_ND_COLOR,
+            )
+            _draw_panel_chrome(
+                right,
+                title="Mocopi",
+                subtitle=f"t={t_mocopi_ms / 1000.0:0.2f}s | {args.mocopi_view}",
+                accent_color=PANEL_MOCOPI_COLOR,
+            )
+
+            combined = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+            combined[:, :panel_width_a] = cv2.resize(left_resized, (panel_width_a, out_h))
+            combined[:, panel_width_a : panel_width_a + panel_width_nd] = cv2.resize(
+                middle_resized, (panel_width_nd, out_h)
+            )
+            combined[:, panel_width_a + panel_width_nd :] = right
+            cv2.line(combined, (panel_width_a, 0), (panel_width_a, out_h - 1), (200, 200, 200), 2)
+            cv2.line(
+                combined,
+                (panel_width_a + panel_width_nd, 0),
+                (panel_width_a + panel_width_nd, out_h - 1),
+                (200, 200, 200),
+                2,
+            )
+            _draw_combined_chrome(
+                combined,
+                panel_width=panel_width_a,
+                frame_idx=frame_idx,
+                camera_time_ms=t_cam_ms,
+                mocopi_time_ms=t_mocopi_ms,
+                offset_ms=offset_ms,
+            )
+            out.write(combined)
+
+        cap_a.release()
+        cap_nd.release()
+        out.release()
+        print(f"[{pair.tag}] Saved triplet video to {output_path}")
+
+
+def run_fourpanel_triplet(args: argparse.Namespace) -> None:
+    if len(args.joints) != len(args.landmarks):
+        raise SystemExit("Expected --joints and --landmarks to have the same length")
+
+    paths = resolve_project_paths(args.project_root)
+    artifact_store = ArtifactStore(paths)
+    artifact_store.ensure_standard_dirs()
+
+    pairs = _resolve_pairs_for_render(
+        project_root=paths.root,
+        tags=[args.tag],
+        camera_role_specs=args.camera_role,
+    )
+    if not pairs:
+        raise SystemExit(f"Tag '{args.tag}' not found in discovered Mocopi/camera pairs.")
+    pair = pairs[0]
+
+    nd_camera_csv = _camera_csv_for_video(pair.nd_video, paths.root)
+    a_camera_csv = _camera_csv_for_video(pair.unfiltered_video, paths.root)
+    if not nd_camera_csv.exists() or not a_camera_csv.exists():
+        raise SystemExit(f"Missing camera CSVs for tag={args.tag} (ND: {nd_camera_csv}, A: {a_camera_csv})")
+
+    seq = load_mocopi_recording(pair.motion_source)
+    t_m_ms, mocopi_pos = compute_egocentric_positions(seq, args.joints)
+
+    nd_df = pd.read_csv(nd_camera_csv)
+    a_df = pd.read_csv(a_camera_csv)
+    try:
+        t_nd_ms, nd_pos = compute_camera_egocentric_positions(
+            nd_df, args.landmarks, visibility_threshold=args.visibility_threshold
+        )
+    except NoCameraPoseDataError as exc:
+        raise SystemExit(f"ND camera CSV has no usable pose landmarks: {nd_camera_csv}") from exc
+    try:
+        t_a_ms, a_pos = compute_camera_egocentric_positions(
+            a_df, args.landmarks, visibility_threshold=args.visibility_threshold
+        )
+    except NoCameraPoseDataError as exc:
+        raise SystemExit(f"A camera CSV has no usable pose landmarks: {a_camera_csv}") from exc
+
+    if args.offset_ms:
+        t_nd_ms = t_nd_ms + args.offset_ms
+        t_a_ms = t_a_ms + args.offset_ms
+
+    if args.offset_ms:
+        t_shift = args.offset_ms
+        t_m_ms = t_m_ms - t_shift
+        t_nd_ms = t_nd_ms - t_shift
+        t_a_ms = t_a_ms - t_shift
+
+    t_nd_count, nd_percent = visibility_percent(nd_df, args.visibility_threshold)
+    t_a_count, a_percent = visibility_percent(a_df, args.visibility_threshold)
+    if args.offset_ms:
+        t_nd_count = t_nd_count + args.offset_ms - t_shift
+        t_a_count = t_a_count + args.offset_ms - t_shift
+
+    fig, axes = plt.subplots(4, 1, figsize=(6, 4), sharex=True)
+    ax_mocopi, ax_a, ax_nd, ax_vis = axes
+
+    time_arrays = []
+    for arr in (t_m_ms, t_a_ms, t_nd_ms, t_a_count, t_nd_count):
+        if arr is not None and len(arr) > 0:
+            time_arrays.append(arr / 1000.0)
+    if not time_arrays:
+        raise SystemExit("No timestamps available to set x-limits.")
+    global_min = float(min(np.min(arr) for arr in time_arrays))
+    global_max = float(max(np.max(arr) for arr in time_arrays))
+    x_lo = args.x_min if args.x_min is not None else global_min
+    x_hi = args.x_max if args.x_max is not None else global_max
+    if x_hi <= x_lo:
+        raise SystemExit("Invalid x-limits: x-max must be greater than x-min.")
+    xlim = (x_lo, x_hi)
+
+    mocopi_traces = {k: mocopi_pos.get(k) for k in args.joints}
+    a_traces = {k: a_pos.get(k) for k in args.landmarks}
+    nd_traces = {k: nd_pos.get(k) for k in args.landmarks}
+
+    nd_factor = nd_factor_from_stem(pair.nd_video.stem)
+    nd_label_text = f"Video ND = {nd_factor:g}" if nd_factor is not None else "Video ND = ?"
+
+    t_a_count, a_percent = _ensure_percent_trace(t_a_count, a_percent, xlim)
+    t_nd_count, nd_percent = _ensure_percent_trace(t_nd_count, nd_percent, xlim)
+
+    _plot_fourpanel_traces(ax_mocopi, t_m_ms, mocopi_traces, "Mocopi", xlim, COLOR_MOCOPI)
+    _plot_fourpanel_traces(ax_a, t_a_ms, a_traces, "Video ND\n0", xlim, COLOR_A)
+    _plot_fourpanel_traces(
+        ax_nd,
+        t_nd_ms,
+        nd_traces,
+        nd_label_text.replace("Video ND = ", "Video ND\n"),
+        xlim,
+        COLOR_ND,
+    )
+
+    for ax, traces, t_ms in (
+        (ax_mocopi, mocopi_traces, t_m_ms),
+        (ax_a, a_traces, t_a_ms),
+        (ax_nd, nd_traces, t_nd_ms),
+    ):
+        if args.y_dy_min is not None or args.y_dy_max is not None:
+            ymin = args.y_dy_min if args.y_dy_min is not None else ax.get_ylim()[0]
+            ymax = args.y_dy_max if args.y_dy_max is not None else ax.get_ylim()[1]
+        else:
+            yl = _fourpanel_auto_ylim_from_window(t_ms, traces, xlim)
+            if yl is None:
+                ymin, ymax = ax.get_ylim()
+            else:
+                ymin, ymax = yl
+        ax.set_ylim(ymin, ymax)
+
+    base_t = np.array([xlim[0], xlim[1]], dtype=float)
+    ax_vis.plot(base_t, np.zeros_like(base_t), color=COLOR_A, linestyle=":", linewidth=1.0)
+    ax_vis.plot(base_t, np.zeros_like(base_t), color=COLOR_ND, linestyle=":", linewidth=1.0)
+    mask_a = np.isfinite(a_percent)
+    if np.any(mask_a):
+        ax_vis.plot(t_a_count[mask_a] / 1000.0, a_percent[mask_a], label="Video ND = 0", color=COLOR_A)
+    mask_nd = np.isfinite(nd_percent)
+    if np.any(mask_nd):
+        ax_vis.plot(t_nd_count[mask_nd] / 1000.0, nd_percent[mask_nd], label=nd_label_text, color=COLOR_ND)
+    ax_vis.set_ylabel("Visible\n keypoints (%)", color=COLOR_MOCOPI)
+    ax_vis.grid(alpha=0.3)
+    ax_vis.legend(fontsize=8, frameon=False)
+    ax_vis.xaxis.set_major_locator(MultipleLocator(1.0))
+    ax_vis.set_xlim(xlim)
+    for spine in ax_vis.spines.values():
+        spine.set_visible(False)
+    if args.y_count_min is not None or args.y_count_max is not None:
+        ymin = args.y_count_min if args.y_count_min is not None else ax_vis.get_ylim()[0]
+        ymax = args.y_count_max if args.y_count_max is not None else ax_vis.get_ylim()[1]
+        ax_vis.set_ylim(ymin, ymax)
+    else:
+        counts_stack = []
+        for t_ms, counts in ((t_a_count, a_percent), (t_nd_count, nd_percent)):
+            if t_ms is None or counts is None or len(t_ms) != len(counts):
+                continue
+            t_s = t_ms / 1000.0
+            mask = (t_s >= xlim[0]) & (t_s <= xlim[1])
+            if not np.any(mask):
+                continue
+            vals = counts[mask]
+            vals = vals[np.isfinite(vals)]
+            if vals.size:
+                counts_stack.extend([float(np.min(vals)), float(np.max(vals))])
+        if counts_stack:
+            cmin = min(counts_stack)
+            cmax = max(counts_stack)
+            if cmax == cmin:
+                pad = max(1.0, cmax * 0.05)
+                ax_vis.set_ylim(cmin - pad, cmax + pad)
+            else:
+                span = cmax - cmin
+                pad = span * 0.05
+                ax_vis.set_ylim(cmin - pad, cmax + pad)
+        else:
+            ax_vis.set_ylim(-1.0, 1.0)
+
+    fig.tight_layout()
+    fig.subplots_adjust(hspace=0.25)
+    if args.output is None:
+        output_path = artifact_store.fourpanel_triplet(
+            pair.tag,
+            offset_ms=args.offset_ms,
+            visibility_threshold=args.visibility_threshold,
+        ).output_plot
+    else:
+        output_path = _resolve_cli_path(args.output, paths.root)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(
+        f"Saved four-panel plot to {output_path} "
+        f"(offset_ms={args.offset_ms:.1f}, visibility_threshold={args.visibility_threshold:.2f})"
+    )
+
+
 def main_side_by_side(argv: list[str] | None = None) -> None:
     parser = build_side_by_side_parser()
     args = parser.parse_args(argv)
     run_side_by_side(args)
+
+
+def main_triplet_video(argv: list[str] | None = None) -> None:
+    parser = build_triplet_video_parser()
+    args = parser.parse_args(argv)
+    run_triplet_video(args)
+
+
+def main_fourpanel_triplet(argv: list[str] | None = None) -> None:
+    parser = build_fourpanel_triplet_parser()
+    args = parser.parse_args(argv)
+    run_fourpanel_triplet(args)

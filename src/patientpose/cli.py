@@ -14,7 +14,14 @@ from patientpose.pipeline.preprocess import (
     run_preprocess_quality_video,
     run_preprocess_video,
 )
-from patientpose.pipeline.rendering import add_side_by_side_args, run_side_by_side
+from patientpose.pipeline.rendering import (
+    add_fourpanel_triplet_args,
+    add_side_by_side_args,
+    add_triplet_video_args,
+    run_fourpanel_triplet,
+    run_side_by_side,
+    run_triplet_video,
+)
 from patientpose.pipeline.reporting import add_pair_report_args, run_pair_report
 
 
@@ -90,6 +97,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_side_by_side_args(render_side_by_side_parser)
     render_side_by_side_parser.set_defaults(handler=run_side_by_side)
+
+    render_triplet_parser = render_subparsers.add_parser(
+        "triplet-video",
+        help="Render three-panel A/ND/Mocopi triplet videos.",
+    )
+    add_triplet_video_args(render_triplet_parser)
+    render_triplet_parser.set_defaults(handler=run_triplet_video)
+
+    render_fourpanel_parser = render_subparsers.add_parser(
+        "fourpanel-triplet",
+        help="Render four-panel egocentric plots for a resolved triplet.",
+    )
+    add_fourpanel_triplet_args(render_fourpanel_parser)
+    render_fourpanel_parser.set_defaults(handler=run_fourpanel_triplet)
 
     return parser
 

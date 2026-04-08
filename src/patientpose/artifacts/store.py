@@ -38,6 +38,17 @@ class SideBySideArtifacts:
     output_video: Path
 
 
+@dataclass(frozen=True)
+class TripletVideoArtifacts:
+    output_dir: Path
+    output_video: Path
+
+
+@dataclass(frozen=True)
+class FourpanelTripletArtifacts:
+    output_plot: Path
+
+
 class ArtifactStore:
     def __init__(self, paths: ProjectPaths) -> None:
         self.paths = paths
@@ -81,4 +92,23 @@ class ArtifactStore:
     def side_by_side(self) -> SideBySideArtifacts:
         return SideBySideArtifacts(
             output_video=self.paths.output_videos / "mocopi_vs_camera.avi",
+        )
+
+    def triplet_video(self, tag: str) -> TripletVideoArtifacts:
+        output_dir = self.paths.output_videos / "triplets"
+        return TripletVideoArtifacts(
+            output_dir=output_dir,
+            output_video=output_dir / f"triplet_{tag}.avi",
+        )
+
+    def fourpanel_triplet(
+        self,
+        tag: str,
+        *,
+        offset_ms: float,
+        visibility_threshold: float,
+    ) -> FourpanelTripletArtifacts:
+        return FourpanelTripletArtifacts(
+            output_plot=self.paths.output_plots
+            / f"fourpanel_{tag}_offset_{offset_ms:.1f}ms_vis_{visibility_threshold:.2f}.pdf",
         )
