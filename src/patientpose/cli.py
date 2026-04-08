@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import argparse
 
-from patientpose.pipeline.analyze import add_reliability_export_args, run_reliability_export
+from patientpose.pipeline.analyze import (
+    add_reliability_batch_args,
+    add_reliability_export_args,
+    run_reliability_batch,
+    run_reliability_export,
+)
 from patientpose.pipeline.preprocess import add_preprocess_video_args, run_preprocess_video
 
 
@@ -38,6 +43,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_reliability_export_args(analyze_reliability_parser)
     analyze_reliability_parser.set_defaults(handler=run_reliability_export)
+
+    analyze_reliability_batch_parser = analyze_subparsers.add_parser(
+        "reliability-batch",
+        help="Batch-run reliability export across discovered pairs.",
+    )
+    add_reliability_batch_args(analyze_reliability_batch_parser)
+    analyze_reliability_batch_parser.set_defaults(handler=run_reliability_batch)
 
     return parser
 
