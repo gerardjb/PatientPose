@@ -65,7 +65,16 @@ def add_side_by_side_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
         "--video",
         type=Path,
         default=None,
-        help="Path to original camera video. If omitted, inferred from the CSV name.",
+        help="Explicit path to the camera-panel video. Overrides --camera-panel-source inference.",
+    )
+    parser.add_argument(
+        "--camera-panel-source",
+        choices=("auto", "deidentified", "deidentified-no-keypoints", "raw"),
+        default="auto",
+        help=(
+            "What to show in the left camera panel when --video is not given. "
+            "'auto' prefers deidentified_no_keypoints, then deidentified, then raw."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -130,23 +139,20 @@ def _resolve_cli_path(path: Path, project_root: Path) -> Path:
     return path if path.is_absolute() else (project_root / path).resolve()
 
 
-def _infer_video_from_csv(csv_path: Path, project_root: Path) -> Path:
-    """
-    Infer the video path from a landmarks CSV filename.
-
-    Primary target:
-        <project-root>/results/OutputVideos/deidentified_<stem>.avi
-
-    Fallback if the de-identified video is missing:
-        search under <project-root>/sample_data/ for a video with the same stem
-    """
+def _csv_stem(csv_path: Path) -> str:
     stem = csv_path.stem
     if stem.startswith("landmarks_"):
         stem = stem[len("landmarks_") :]
+    return stem
 
-    deid = (project_root / "results" / "OutputVideos" / f"deidentified_{stem}.avi").resolve()
-    if deid.is_file():
-        return deid
+
+def _infer_raw_video_from_csv(csv_path: Path, project_root: Path, metadata: dict | None = None) -> Path:
+    if metadata and metadata.get("source_video"):
+        metadata_path = Path(metadata["source_video"]).resolve()
+        if metadata_path.is_file():
+            return metadata_path
+
+    stem = _csv_stem(csv_path)
 
     legacy_path = (project_root / "sample_data" / f"{stem}.mp4").resolve()
     if legacy_path.is_file():
@@ -160,10 +166,35 @@ def _infer_video_from_csv(csv_path: Path, project_root: Path) -> Path:
 
 
 def _infer_metadata_from_csv(csv_path: Path, project_root: Path) -> Path:
-    stem = csv_path.stem
-    if stem.startswith("landmarks_"):
-        stem = stem[len("landmarks_") :]
+    stem = _csv_stem(csv_path)
     return (project_root / "results" / "OutputCSVs" / f"landmarks_metadata_{stem}.json").resolve()
+
+
+def _infer_processed_video_from_csv(
+    csv_path: Path,
+    project_root: Path,
+    variant: str,
+    metadata: dict | None = None,
+) -> Path | None:
+    if variant == "deidentified":
+        metadata_key = "annotated_video"
+        prefix = "deidentified_"
+    elif variant == "deidentified-no-keypoints":
+        metadata_key = "plain_video"
+        prefix = "deidentified_no_keypoints_"
+    else:
+        raise ValueError(f"Unsupported processed video variant: {variant}")
+
+    if metadata and metadata.get(metadata_key):
+        metadata_path = Path(metadata[metadata_key]).resolve()
+        if metadata_path.is_file():
+            return metadata_path
+
+    stem = _csv_stem(csv_path)
+    candidate = (project_root / "results" / "OutputVideos" / f"{prefix}{stem}.avi").resolve()
+    if candidate.is_file():
+        return candidate
+    return None
 
 
 def _timestamp_for_frame(
@@ -207,6 +238,43 @@ def _load_processing_metadata(camera_csv_path: Path, project_root: Path) -> dict
         return json.loads(metadata_path.read_text())
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _resolve_camera_panel_video(
+    *,
+    camera_csv_path: Path,
+    explicit_video_path: Path | None,
+    project_root: Path,
+    panel_source: str,
+) -> tuple[Path, str]:
+    if explicit_video_path is not None:
+        return explicit_video_path, "explicit"
+
+    metadata = _load_processing_metadata(camera_csv_path, project_root)
+
+    if panel_source == "auto":
+        annotated_video = _infer_processed_video_from_csv(
+            camera_csv_path, project_root, "deidentified", metadata
+        )
+        if annotated_video is not None:
+            return annotated_video, "deidentified"
+        plain_video = _infer_processed_video_from_csv(
+            camera_csv_path, project_root, "deidentified-no-keypoints", metadata
+        )
+        if plain_video is not None:
+            return plain_video, "deidentified-no-keypoints"
+        return _infer_raw_video_from_csv(camera_csv_path, project_root, metadata), "raw"
+
+    if panel_source in {"deidentified", "deidentified-no-keypoints"}:
+        processed_video = _infer_processed_video_from_csv(camera_csv_path, project_root, panel_source, metadata)
+        if processed_video is None:
+            raise FileNotFoundError(
+                f"Could not find a {panel_source} camera-panel video for {camera_csv_path}. "
+                "Run preprocess first or pass --video explicitly."
+            )
+        return processed_video, panel_source
+
+    return _infer_raw_video_from_csv(camera_csv_path, project_root, metadata), "raw"
 
 
 def _is_processed_video(video_path: Path) -> bool:
@@ -258,14 +326,54 @@ def _draw_panel_chrome(
     accent_color: tuple[int, int, int],
 ) -> None:
     h, w = panel.shape[:2]
-    header_h = max(78, int(0.085 * h))
+    scale_factor = max(h / 1080.0, 0.9)
+    title_scale = 1.1 * scale_factor
+    subtitle_scale = 0.76 * scale_factor
+    title_thickness = max(2, int(round(2.0 * scale_factor)))
+    subtitle_thickness = max(1, int(round(1.5 * scale_factor)))
+    title_size, _ = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, title_scale, title_thickness)
+    subtitle_size, _ = cv2.getTextSize(subtitle, cv2.FONT_HERSHEY_SIMPLEX, subtitle_scale, subtitle_thickness)
+    top_pad = max(18, int(0.018 * h))
+    row_gap = max(16, int(0.016 * h))
+    bottom_pad = max(16, int(0.016 * h))
+    header_h = max(
+        100,
+        int(
+            top_pad
+            + title_size[1]
+            + row_gap
+            + subtitle_size[1]
+            + bottom_pad
+        ),
+    )
     overlay = panel.copy()
     cv2.rectangle(overlay, (0, 0), (w - 1, header_h), (18, 18, 18), -1)
     cv2.addWeighted(overlay, 0.72, panel, 0.28, 0.0, panel)
     cv2.rectangle(panel, (0, 0), (w - 1, h - 1), accent_color, 2)
     cv2.line(panel, (0, header_h), (w - 1, header_h), accent_color, 2)
-    cv2.putText(panel, title, (20, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.9, accent_color, 2, cv2.LINE_AA)
-    cv2.putText(panel, subtitle, (20, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (240, 240, 240), 1, cv2.LINE_AA)
+    text_x = max(20, int(0.018 * w))
+    title_y = top_pad + title_size[1]
+    subtitle_y = title_y + row_gap + subtitle_size[1]
+    cv2.putText(
+        panel,
+        title,
+        (text_x, title_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        title_scale,
+        accent_color,
+        title_thickness,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        panel,
+        subtitle,
+        (text_x, subtitle_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        subtitle_scale,
+        (240, 240, 240),
+        subtitle_thickness,
+        cv2.LINE_AA,
+    )
 
 
 def _draw_combined_chrome(
@@ -283,14 +391,20 @@ def _draw_combined_chrome(
         f"Frame {frame_idx} | camera {camera_time_ms / 1000.0:0.2f}s | "
         f"mocopi {mocopi_time_ms / 1000.0:0.2f}s | offset {offset_ms:+0.0f} ms"
     )
+    scale_factor = max(h / 1080.0, 0.9)
+    footer_scale = 0.72 * scale_factor
+    footer_thickness = max(1, int(round(1.5 * scale_factor)))
+    footer_size, _ = cv2.getTextSize(footer, cv2.FONT_HERSHEY_SIMPLEX, footer_scale, footer_thickness)
+    footer_x = max(18, int(0.012 * combined.shape[1]))
+    footer_y = h - max(20, int(0.02 * h))
     cv2.putText(
         combined,
         footer,
-        (18, h - 20),
+        (footer_x, max(footer_size[1] + 8, footer_y)),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
+        footer_scale,
         (225, 225, 225),
-        1,
+        footer_thickness,
         cv2.LINE_AA,
     )
 
@@ -302,8 +416,12 @@ def run_side_by_side(args: argparse.Namespace) -> None:
 
     motion_source = _resolve_cli_path(args.motion_source, paths.root)
     camera_csv_path = _resolve_cli_path(args.camera_csv, paths.root)
-    video_path = _resolve_cli_path(args.video, paths.root) if args.video is not None else _infer_video_from_csv(
-        camera_csv_path, paths.root
+    explicit_video_path = _resolve_cli_path(args.video, paths.root) if args.video is not None else None
+    video_path, camera_panel_source = _resolve_camera_panel_video(
+        camera_csv_path=camera_csv_path,
+        explicit_video_path=explicit_video_path,
+        project_root=paths.root,
+        panel_source=args.camera_panel_source,
     )
     output_path = (
         _resolve_cli_path(args.output, paths.root)
@@ -314,6 +432,7 @@ def run_side_by_side(args: argparse.Namespace) -> None:
     print(f"Motion source: {motion_source}")
     print(f"Camera CSV:    {camera_csv_path}")
     print(f"Video source:  {video_path}")
+    print(f"Camera panel:  {camera_panel_source}")
     print(f"Output video:  {output_path}")
 
     seq = load_mocopi_recording(motion_source)
@@ -388,13 +507,22 @@ def run_side_by_side(args: argparse.Namespace) -> None:
 
         right = np.zeros_like(left)
         draw_mocopi_skeleton(right, mocopi_positions, t_mocopi_ms, t_m_ms, view=args.mocopi_view)
-        left_title = "Camera"
-        if _is_processed_video(video_path):
-            left_title = "Camera (processed)"
+        if camera_panel_source == "deidentified-no-keypoints":
+            left_title = "Camera (deidentified)"
+            left_subtitle = f"t={t_cam_ms / 1000.0:0.2f}s | no keypoints"
+        elif camera_panel_source == "deidentified":
+            left_title = "Camera (deidentified)"
+            left_subtitle = f"t={t_cam_ms / 1000.0:0.2f}s | annotated"
+        elif camera_panel_source == "raw":
+            left_title = "Camera (raw)"
+            left_subtitle = f"t={t_cam_ms / 1000.0:0.2f}s | source video"
+        else:
+            left_title = "Camera"
+            left_subtitle = f"t={t_cam_ms / 1000.0:0.2f}s | explicit"
         _draw_panel_chrome(
             left,
             title=left_title,
-            subtitle=f"t={t_cam_ms / 1000.0:0.2f}s | frame {frame_idx}",
+            subtitle=left_subtitle,
             accent_color=PANEL_CAMERA_COLOR,
         )
         _draw_panel_chrome(
