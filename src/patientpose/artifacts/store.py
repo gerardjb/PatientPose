@@ -12,6 +12,7 @@ class PreprocessVideoArtifacts:
     plain_video: Path
     landmarks_csv: Path
     frame_summary_csv: Path
+    metadata_json: Path
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ class QualityVideoArtifacts:
     landmarks_csv: Path
     position_plot: Path
     quality_plot: Path
+    metadata_json: Path
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,7 @@ class ArtifactStore:
             plain_video=self.paths.output_videos / f"deidentified_no_keypoints_{stem}.avi",
             landmarks_csv=self.paths.output_csvs / f"landmarks_{stem}.csv",
             frame_summary_csv=self.paths.output_csvs / f"landmarks_summary_{stem}.csv",
+            metadata_json=self.paths.output_csvs / f"landmarks_metadata_{stem}.json",
         )
 
     def preprocess_quality_video(self, video_path: Path) -> QualityVideoArtifacts:
@@ -63,6 +66,7 @@ class ArtifactStore:
             landmarks_csv=self.paths.output_csvs / f"landmarks_{stem}.csv",
             position_plot=self.paths.output_plots / f"fingertip_position_{stem}.png",
             quality_plot=self.paths.output_plots / f"fingertip_quality_{stem}.png",
+            metadata_json=self.paths.output_csvs / f"landmarks_metadata_{stem}.json",
         )
 
     def pair_report(self) -> PairReportArtifacts:

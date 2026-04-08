@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import cv2
@@ -35,6 +36,8 @@ PROCESSED_VIDEO_PREFIXES = (
     "quality_vis_",
     "quality_vis_no_keypoints_",
 )
+PANEL_CAMERA_COLOR = (72, 214, 118)
+PANEL_MOCOPI_COLOR = (65, 189, 255)
 
 
 def add_side_by_side_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -156,6 +159,13 @@ def _infer_video_from_csv(csv_path: Path, project_root: Path) -> Path:
     return legacy_path
 
 
+def _infer_metadata_from_csv(csv_path: Path, project_root: Path) -> Path:
+    stem = csv_path.stem
+    if stem.startswith("landmarks_"):
+        stem = stem[len("landmarks_") :]
+    return (project_root / "results" / "OutputCSVs" / f"landmarks_metadata_{stem}.json").resolve()
+
+
 def _timestamp_for_frame(
     cam_df: pd.DataFrame,
     frame_idx: int,
@@ -180,21 +190,47 @@ def _rotation_label(rotation_code: int | None) -> str:
     return labels.get(rotation_code, "unknown")
 
 
+def _rotation_code_from_label(label: str | None) -> tuple[bool, int | None]:
+    if label is None:
+        return False, None
+    normalized = label.strip().lower()
+    if normalized not in VIDEO_ROTATION_CHOICES:
+        return False, None
+    return True, VIDEO_ROTATION_CHOICES[normalized]
+
+
+def _load_processing_metadata(camera_csv_path: Path, project_root: Path) -> dict | None:
+    metadata_path = _infer_metadata_from_csv(camera_csv_path, project_root)
+    if not metadata_path.is_file():
+        return None
+    try:
+        return json.loads(metadata_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def _is_processed_video(video_path: Path) -> bool:
     return video_path.name.startswith(PROCESSED_VIDEO_PREFIXES)
 
 
 def _resolve_video_rotation_code(
     video_path: Path,
+    camera_csv_path: Path,
     paths,
     rotation_mode: str,
     orientation_max_scan: int | None,
-) -> int | None:
+) -> tuple[int | None, str]:
     if rotation_mode != "auto":
-        return VIDEO_ROTATION_CHOICES[rotation_mode]
+        return VIDEO_ROTATION_CHOICES[rotation_mode], "explicit"
 
     if _is_processed_video(video_path):
-        return None
+        return None, "processed-video"
+
+    metadata = _load_processing_metadata(camera_csv_path, paths.root)
+    if metadata is not None:
+        found_rotation, rotation_code = _rotation_code_from_label(metadata.get("rotation_label"))
+        if metadata.get("source_video") and found_rotation:
+            return rotation_code, f"metadata:{metadata.get('orientation_source', 'unknown')}"
 
     pose_model_path = paths.models / POSE_MODEL_FILENAME
     if not pose_model_path.is_file():
@@ -202,12 +238,60 @@ def _resolve_video_rotation_code(
             f"Pose model file not found at {pose_model_path}; needed for --video-rotation auto."
         )
 
-    return determine_rotation_code(
-        video_path,
-        pose_model_path,
-        rotate_flag=False,
-        auto_orient=True,
-        orientation_max_scan=orientation_max_scan,
+    return (
+        determine_rotation_code(
+            video_path,
+            pose_model_path,
+            rotate_flag=False,
+            auto_orient=True,
+            orientation_max_scan=orientation_max_scan,
+        ),
+        "inferred",
+    )
+
+
+def _draw_panel_chrome(
+    panel: np.ndarray,
+    *,
+    title: str,
+    subtitle: str,
+    accent_color: tuple[int, int, int],
+) -> None:
+    h, w = panel.shape[:2]
+    header_h = max(78, int(0.085 * h))
+    overlay = panel.copy()
+    cv2.rectangle(overlay, (0, 0), (w - 1, header_h), (18, 18, 18), -1)
+    cv2.addWeighted(overlay, 0.72, panel, 0.28, 0.0, panel)
+    cv2.rectangle(panel, (0, 0), (w - 1, h - 1), accent_color, 2)
+    cv2.line(panel, (0, header_h), (w - 1, header_h), accent_color, 2)
+    cv2.putText(panel, title, (20, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.9, accent_color, 2, cv2.LINE_AA)
+    cv2.putText(panel, subtitle, (20, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (240, 240, 240), 1, cv2.LINE_AA)
+
+
+def _draw_combined_chrome(
+    combined: np.ndarray,
+    *,
+    panel_width: int,
+    frame_idx: int,
+    camera_time_ms: float,
+    mocopi_time_ms: float,
+    offset_ms: float,
+) -> None:
+    h = combined.shape[0]
+    cv2.line(combined, (panel_width, 0), (panel_width, h - 1), (200, 200, 200), 2)
+    footer = (
+        f"Frame {frame_idx} | camera {camera_time_ms / 1000.0:0.2f}s | "
+        f"mocopi {mocopi_time_ms / 1000.0:0.2f}s | offset {offset_ms:+0.0f} ms"
+    )
+    cv2.putText(
+        combined,
+        footer,
+        (18, h - 20),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (225, 225, 225),
+        1,
+        cv2.LINE_AA,
     )
 
 
@@ -251,13 +335,14 @@ def run_side_by_side(args: argparse.Namespace) -> None:
     camera_by_frame = prepare_camera_landmarks(cam_df)
     t_m_ms, mocopi_positions = prepare_mocopi_positions(seq)
 
-    video_rotation_code = _resolve_video_rotation_code(
+    video_rotation_code, rotation_source = _resolve_video_rotation_code(
         video_path,
+        camera_csv_path,
         paths,
         args.video_rotation,
         args.orientation_max_scan,
     )
-    print(f"Video rotation: {_rotation_label(video_rotation_code)}")
+    print(f"Video rotation: {_rotation_label(video_rotation_code)} ({rotation_source})")
     print(f"Mocopi view:    {args.mocopi_view}")
 
     cap = cv2.VideoCapture(str(video_path))
@@ -303,10 +388,33 @@ def run_side_by_side(args: argparse.Namespace) -> None:
 
         right = np.zeros_like(left)
         draw_mocopi_skeleton(right, mocopi_positions, t_mocopi_ms, t_m_ms, view=args.mocopi_view)
+        left_title = "Camera"
+        if _is_processed_video(video_path):
+            left_title = "Camera (processed)"
+        _draw_panel_chrome(
+            left,
+            title=left_title,
+            subtitle=f"t={t_cam_ms / 1000.0:0.2f}s | frame {frame_idx}",
+            accent_color=PANEL_CAMERA_COLOR,
+        )
+        _draw_panel_chrome(
+            right,
+            title="Mocopi",
+            subtitle=f"t={t_mocopi_ms / 1000.0:0.2f}s | {args.mocopi_view}",
+            accent_color=PANEL_MOCOPI_COLOR,
+        )
 
         combined = np.zeros((height, width * 2, 3), dtype=left.dtype)
         combined[:, :width] = left
         combined[:, width:] = right
+        _draw_combined_chrome(
+            combined,
+            panel_width=width,
+            frame_idx=frame_idx,
+            camera_time_ms=t_cam_ms,
+            mocopi_time_ms=t_mocopi_ms,
+            offset_ms=offset_ms,
+        )
         out.write(combined)
 
     cap.release()

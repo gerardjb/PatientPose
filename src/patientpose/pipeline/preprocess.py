@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import List
@@ -78,6 +79,12 @@ QUALITY_LANDMARK_COLUMNS = [
     "mean_motion_diff",
     "quality_score",
 ]
+ROTATION_LABELS = {
+    None: "none",
+    cv2.ROTATE_90_CLOCKWISE: "90cw",
+    cv2.ROTATE_90_COUNTERCLOCKWISE: "90ccw",
+    cv2.ROTATE_180: "180",
+}
 
 
 def _pose_quality_value(pose_quality) -> float:
@@ -88,6 +95,39 @@ def _pose_quality_value(pose_quality) -> float:
         if isinstance(value, (int, float)):
             return float(value)
     return float("nan")
+
+
+def _rotation_label(rotation_code: int | None) -> str:
+    return ROTATION_LABELS.get(rotation_code, "unknown")
+
+
+def _write_processing_metadata(
+    *,
+    video_path: Path,
+    rotation_code: int | None,
+    metadata_path: Path,
+    mode: str,
+    orientation_source: str,
+    landmarks_csv: Path,
+    annotated_video: Path,
+    plain_video: Path,
+    extra: dict | None = None,
+) -> None:
+    payload = {
+        "video_stem": video_path.stem,
+        "source_video": str(video_path.resolve()),
+        "mode": mode,
+        "orientation_source": orientation_source,
+        "rotation_label": _rotation_label(rotation_code),
+        "landmarks_csv": str(landmarks_csv.resolve()),
+        "annotated_video": str(annotated_video.resolve()),
+        "plain_video": str(plain_video.resolve()),
+    }
+    if extra:
+        payload.update(extra)
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(json.dumps(payload, indent=2))
+    print(f"Processing metadata saved to {metadata_path}")
 
 
 def add_preprocess_video_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -221,6 +261,7 @@ def process_video(
     artifacts: PreprocessVideoArtifacts,
     *,
     pose_focus_hint: PoseFocusHint | None = None,
+    orientation_source: str = "auto",
 ) -> None:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -349,6 +390,18 @@ def process_video(
     frame_summary_df = pd.DataFrame(frame_summaries, columns=FRAME_SUMMARY_COLUMNS)
     frame_summary_df.to_csv(artifacts.frame_summary_csv, index=False)
     print(f"Frame summary saved to {artifacts.frame_summary_csv}")
+
+    _write_processing_metadata(
+        video_path=video_path,
+        rotation_code=rotation_code,
+        metadata_path=artifacts.metadata_json,
+        mode="preprocess-video",
+        orientation_source=orientation_source,
+        landmarks_csv=artifacts.landmarks_csv,
+        annotated_video=artifacts.annotated_video,
+        plain_video=artifacts.plain_video,
+        extra={"frame_summary_csv": str(artifacts.frame_summary_csv.resolve())},
+    )
 
     print(f"De-identified video saved to {artifacts.annotated_video}")
     print(f"De-identified video without keypoints saved to {artifacts.plain_video}")
@@ -503,6 +556,8 @@ def process_quality_video(
     hand_model_path: Path,
     rotation_code: int | None,
     artifacts: QualityVideoArtifacts,
+    *,
+    orientation_source: str = "manual",
 ) -> None:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -670,6 +725,21 @@ def process_quality_video(
     else:
         print(f"No landmark data was collected; wrote empty landmark CSV to: {artifacts.landmarks_csv}")
 
+    _write_processing_metadata(
+        video_path=video_path,
+        rotation_code=rotation_code,
+        metadata_path=artifacts.metadata_json,
+        mode="preprocess-quality-video",
+        orientation_source=orientation_source,
+        landmarks_csv=artifacts.landmarks_csv,
+        annotated_video=artifacts.annotated_video,
+        plain_video=artifacts.plain_video,
+        extra={
+            "position_plot": str(artifacts.position_plot.resolve()),
+            "quality_plot": str(artifacts.quality_plot.resolve()),
+        },
+    )
+
     print(f"Quality video with keypoints saved to: {artifacts.annotated_video}")
     print(f"Quality video without keypoints saved to: {artifacts.plain_video}")
     print("Video processing finished. Generating plots...")
@@ -708,6 +778,7 @@ def run_preprocess_video(args: argparse.Namespace) -> None:
     )
 
     artifacts = artifact_store.preprocess_video(video_path)
+    orientation_source = "manual-90cw" if args.rotate else ("auto" if args.auto_orient else "none")
     process_video(
         video_path,
         hand_model_path,
@@ -715,6 +786,7 @@ def run_preprocess_video(args: argparse.Namespace) -> None:
         rotation_code,
         artifacts,
         pose_focus_hint=pose_focus_hint,
+        orientation_source=orientation_source,
     )
 
 
@@ -735,7 +807,14 @@ def run_preprocess_quality_video(args: argparse.Namespace) -> None:
 
     rotation_code = cv2.ROTATE_90_CLOCKWISE if args.rotate else None
     artifacts = artifact_store.preprocess_quality_video(video_path)
-    process_quality_video(video_path, hand_model_path, rotation_code, artifacts)
+    orientation_source = "manual-90cw" if args.rotate else "none"
+    process_quality_video(
+        video_path,
+        hand_model_path,
+        rotation_code,
+        artifacts,
+        orientation_source=orientation_source,
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
