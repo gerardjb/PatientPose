@@ -336,3 +336,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_preprocess_video_parser()
     args = parser.parse_args(argv)
     run_preprocess_video(args)
+
+
+if __name__ == "__main__":
+    main()
