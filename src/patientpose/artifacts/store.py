@@ -14,6 +14,15 @@ class PreprocessVideoArtifacts:
     frame_summary_csv: Path
 
 
+@dataclass(frozen=True)
+class QualityVideoArtifacts:
+    annotated_video: Path
+    plain_video: Path
+    landmarks_csv: Path
+    position_plot: Path
+    quality_plot: Path
+
+
 class ArtifactStore:
     def __init__(self, paths: ProjectPaths) -> None:
         self.paths = paths
@@ -31,4 +40,14 @@ class ArtifactStore:
             plain_video=self.paths.output_videos / f"deidentified_no_keypoints_{stem}.avi",
             landmarks_csv=self.paths.output_csvs / f"landmarks_{stem}.csv",
             frame_summary_csv=self.paths.output_csvs / f"landmarks_summary_{stem}.csv",
+        )
+
+    def preprocess_quality_video(self, video_path: Path) -> QualityVideoArtifacts:
+        stem = video_path.stem
+        return QualityVideoArtifacts(
+            annotated_video=self.paths.output_videos / f"quality_vis_{stem}.avi",
+            plain_video=self.paths.output_videos / f"quality_vis_no_keypoints_{stem}.avi",
+            landmarks_csv=self.paths.output_csvs / f"landmarks_{stem}.csv",
+            position_plot=self.paths.output_plots / f"fingertip_position_{stem}.png",
+            quality_plot=self.paths.output_plots / f"fingertip_quality_{stem}.png",
         )

@@ -8,7 +8,12 @@ from patientpose.pipeline.analyze import (
     run_reliability_batch,
     run_reliability_export,
 )
-from patientpose.pipeline.preprocess import add_preprocess_video_args, run_preprocess_video
+from patientpose.pipeline.preprocess import (
+    add_preprocess_quality_video_args,
+    add_preprocess_video_args,
+    run_preprocess_quality_video,
+    run_preprocess_video,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +35,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_preprocess_video_args(preprocess_video_parser)
     preprocess_video_parser.set_defaults(handler=run_preprocess_video)
+
+    preprocess_quality_parser = preprocess_subparsers.add_parser(
+        "quality-video",
+        help="Run the quality-visualization preprocessing workflow.",
+    )
+    add_preprocess_quality_video_args(preprocess_quality_parser)
+    preprocess_quality_parser.set_defaults(handler=run_preprocess_quality_video)
 
     analyze_parser = subparsers.add_parser(
         "analyze",
