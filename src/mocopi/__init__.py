@@ -20,7 +20,12 @@ from .camera_projection import (
     CameraProjectionResult,
     compute_camera_projection,
 )
-from .sync import estimate_time_offset, clean_feature_samples, estimate_camera_to_mocopi_offset
+from .sync import (
+    estimate_time_offset,
+    clean_feature_samples,
+    estimate_camera_to_mocopi_offset,
+    estimate_camera_to_camera_offset,
+)
 from .nd_pilot import (
     CameraRecording,
     CaptureSession,
@@ -75,6 +80,7 @@ __all__ = [
     "estimate_time_offset",
     "clean_feature_samples",
     "estimate_camera_to_mocopi_offset",
+    "estimate_camera_to_camera_offset",
     "CameraRecording",
     "CaptureSession",
     "TrialPair",

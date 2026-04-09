@@ -173,3 +173,54 @@ def estimate_camera_to_mocopi_offset(
         step_ms=10.0,
     )
     return float(best_offset)
+
+
+def estimate_camera_to_camera_offset(
+    cam_ref_df: pd.DataFrame,
+    cam_moving_df: pd.DataFrame,
+    search_ms: float,
+    rate_hz: float,
+    offset_ms: float | None = None,
+) -> float:
+    """
+    Estimate or reuse the moving-camera → reference-camera offset using
+    egocentric, scale-normalized RIGHT_WRIST vertical motion.
+
+    The returned value is applied such that:
+        t_moving_shifted = t_moving_ms + offset_ms
+    aligns the moving camera onto the reference camera.
+    """
+    if offset_ms is not None:
+        return float(offset_ms)
+
+    t_ref_ms, ref_pos = compute_camera_egocentric_positions(cam_ref_df, ["RIGHT_WRIST"])
+    if "RIGHT_WRIST" not in ref_pos:
+        raise RuntimeError("Landmark 'RIGHT_WRIST' not found in reference camera CSV")
+    f_ref = ref_pos["RIGHT_WRIST"][:, 1]
+    t_ref_ms, f_ref = clean_feature_samples(t_ref_ms, f_ref, "reference camera RIGHT_WRIST")
+
+    t_moving_ms, moving_pos = compute_camera_egocentric_positions(cam_moving_df, ["RIGHT_WRIST"])
+    if "RIGHT_WRIST" not in moving_pos:
+        raise RuntimeError("Landmark 'RIGHT_WRIST' not found in moving camera CSV")
+    f_moving = moving_pos["RIGHT_WRIST"][:, 1]
+    t_moving_ms, f_moving = clean_feature_samples(t_moving_ms, f_moving, "moving camera RIGHT_WRIST")
+
+    t_ref_res, f_ref_res = resample_feature(t_ref_ms, f_ref, rate_hz)
+    t_moving_res, f_moving_res = resample_feature(t_moving_ms, f_moving, rate_hz)
+
+    t_moving_res = np.asarray(t_moving_res)
+    f_moving_res = np.asarray(f_moving_res)
+    if t_moving_res.shape != f_moving_res.shape:
+        n = min(len(t_moving_res), len(f_moving_res))
+        t_moving_res = t_moving_res[:n]
+        f_moving_res = f_moving_res[:n]
+
+    best_offset, _ = estimate_time_offset(
+        t_ref_res,
+        f_ref_res,
+        t_moving_res,
+        f_moving_res,
+        search_range_ms=search_ms,
+        step_ms=10.0,
+    )
+    return float(best_offset)

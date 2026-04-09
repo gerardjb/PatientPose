@@ -118,12 +118,12 @@ class ArtifactStore:
         *,
         camera_space: str,
         component: str,
-        offset_ms: float,
+        offset_label: str,
         visibility_threshold: float,
     ) -> FourpanelTripletArtifacts:
         return FourpanelTripletArtifacts(
             output_plot=self.paths.output_plots
-            / f"fourpanel_{tag}_{camera_space}_d{component}_offset_{offset_ms:.1f}ms_vis_{visibility_threshold:.2f}.pdf",
+            / f"fourpanel_{tag}_{camera_space}_d{component}_{offset_label}_vis_{visibility_threshold:.2f}.pdf",
         )
 
     def egocentric_diagnostics(self, stem: str, frame_mode: str, space: str) -> EgocentricDiagnosticsArtifacts:

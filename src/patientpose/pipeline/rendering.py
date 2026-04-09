@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 
 from mocopi import (
+    estimate_camera_to_camera_offset,
     estimate_camera_to_mocopi_offset,
     load_mocopi_recording,
     nd_factor_from_stem,
@@ -263,9 +264,11 @@ def add_fourpanel_triplet_args(parser: argparse.ArgumentParser) -> argparse.Argu
     parser.add_argument(
         "--offset-ms",
         type=float,
-        default=0.0,
-        help="Optional camera-to-mocopi offset (ms) to apply before plotting.",
+        default=None,
+        help="Optional fixed camera-to-mocopi offset (ms) to apply before plotting. If omitted, estimated by cross-correlation.",
     )
+    parser.add_argument("--search_ms", type=float, default=5000.0, help="Search range for offset estimation.")
+    parser.add_argument("--rate_hz", type=float, default=50.0, help="Resampling rate for offset estimation.")
     parser.add_argument("--x-min", type=float, default=None, help="Optional minimum time (s) for all x-axes.")
     parser.add_argument("--x-max", type=float, default=None, help="Optional maximum time (s) for all x-axes.")
     parser.add_argument("--y-dy-min", type=float, default=None, help="Optional minimum dY for motion panels.")
@@ -382,6 +385,84 @@ def _timestamp_for_frame(
     return frame_idx * 1000.0 / fps
 
 
+def _build_frame_timestamps(cam_df: pd.DataFrame, frame_count: int, fps: float) -> np.ndarray:
+    step_ms = 1000.0 / max(fps, 1e-6)
+    base = np.arange(frame_count, dtype=float) * step_ms
+    if frame_count <= 0 or cam_df.empty or "frame" not in cam_df.columns or "timestamp_ms" not in cam_df.columns:
+        return base
+
+    frame_ts = (
+        cam_df[["frame", "timestamp_ms"]]
+        .dropna()
+        .drop_duplicates(subset=["frame"])
+        .sort_values("frame")
+    )
+    if frame_ts.empty:
+        return base
+
+    frames = frame_ts["frame"].to_numpy(dtype=int)
+    timestamps = frame_ts["timestamp_ms"].to_numpy(dtype=float)
+    valid = (frames >= 0) & (frames < frame_count) & np.isfinite(timestamps)
+    frames = frames[valid]
+    timestamps = timestamps[valid]
+    if frames.size == 0:
+        return base
+
+    offset_ms = float(timestamps[0] - frames[0] * step_ms)
+    full = base + offset_ms
+    if frames.size == 1:
+        return full
+
+    interp_frames = np.arange(frames[0], frames[-1] + 1, dtype=float)
+    full[frames[0] : frames[-1] + 1] = np.interp(interp_frames, frames.astype(float), timestamps)
+    return full
+
+
+def _nearest_frame_index(frame_timestamps_ms: np.ndarray, target_ms: float) -> int:
+    if frame_timestamps_ms.size == 0:
+        return 0
+    idx = int(np.searchsorted(frame_timestamps_ms, target_ms))
+    if idx <= 0:
+        return 0
+    if idx >= frame_timestamps_ms.size:
+        return int(frame_timestamps_ms.size - 1)
+    prev_idx = idx - 1
+    if abs(frame_timestamps_ms[idx] - target_ms) < abs(frame_timestamps_ms[prev_idx] - target_ms):
+        return idx
+    return prev_idx
+
+
+def _read_frame_at_index(
+    cap: cv2.VideoCapture,
+    target_idx: int,
+    *,
+    rotation_code: int | None,
+    last_idx: int | None,
+) -> tuple[bool, np.ndarray | None, int | None]:
+    if target_idx < 0:
+        target_idx = 0
+
+    if last_idx is None or target_idx <= last_idx or target_idx > last_idx + 1:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, target_idx)
+        last_idx = target_idx - 1
+
+    frame: np.ndarray | None = None
+    ret = False
+    while last_idx < target_idx:
+        ret, frame = cap.read()
+        if not ret:
+            return False, None, last_idx
+        last_idx += 1
+
+    if frame is None:
+        ret, frame = cap.read()
+        if not ret:
+            return False, None, last_idx
+        last_idx += 1
+
+    return True, rotate_frame(frame, rotation_code), last_idx
+
+
 def _rotation_label(rotation_code: int | None) -> str:
     labels = {
         None: "none",
@@ -473,6 +554,58 @@ def _resolve_pairs_for_render(
         else:
             print("No matching Mocopi/camera pairs found.")
     return pairs
+
+
+def _resolve_fourpanel_offsets(
+    seq,
+    *,
+    nd_image_df: pd.DataFrame,
+    a_image_df: pd.DataFrame,
+    offset_ms: float | None,
+    search_ms: float,
+    rate_hz: float,
+) -> tuple[float, float, str]:
+    if offset_ms is not None:
+        fixed = float(offset_ms)
+        return fixed, fixed, f"offset_fixed_{fixed:.1f}ms"
+
+    nd_offset_ms = estimate_camera_to_mocopi_offset(
+        seq,
+        nd_image_df,
+        search_ms,
+        rate_hz,
+        None,
+    )
+    a_offset_ms = estimate_camera_to_mocopi_offset(
+        seq,
+        a_image_df,
+        search_ms,
+        rate_hz,
+        None,
+    )
+    return (
+        float(nd_offset_ms),
+        float(a_offset_ms),
+        f"offset_auto_ND{nd_offset_ms:.1f}ms_A{a_offset_ms:.1f}ms",
+    )
+
+
+def _estimate_direct_camera_offset(
+    *,
+    reference_df: pd.DataFrame,
+    moving_df: pd.DataFrame,
+    search_ms: float,
+    rate_hz: float,
+) -> float | None:
+    try:
+        return estimate_camera_to_camera_offset(
+            reference_df,
+            moving_df,
+            search_ms=search_ms,
+            rate_hz=rate_hz,
+        )
+    except (NoCameraPoseDataError, RuntimeError, ValueError):
+        return None
 
 
 def _rotated_video_size(width: int, height: int, rotation_code: int | None) -> tuple[int, int]:
@@ -678,13 +811,16 @@ def _draw_combined_chrome(
     frame_idx: int,
     camera_time_ms: float,
     mocopi_time_ms: float,
-    offset_ms: float,
+    offset_ms: float | None = None,
+    offset_text: str | None = None,
 ) -> None:
     h = combined.shape[0]
     cv2.line(combined, (panel_width, 0), (panel_width, h - 1), (200, 200, 200), 2)
+    if offset_text is None:
+        offset_text = f"offset {float(offset_ms or 0.0):+0.0f} ms"
     footer = (
         f"Frame {frame_idx} | camera {camera_time_ms / 1000.0:0.2f}s | "
-        f"mocopi {mocopi_time_ms / 1000.0:0.2f}s | offset {offset_ms:+0.0f} ms"
+        f"mocopi {mocopi_time_ms / 1000.0:0.2f}s | {offset_text}"
     )
     scale_factor = max(h / 1080.0, 0.9)
     footer_scale = 0.72 * scale_factor
@@ -868,22 +1004,42 @@ def run_triplet_video(args: argparse.Namespace) -> None:
         seq = load_mocopi_recording(pair.motion_source)
         nd_df = pd.read_csv(nd_camera_csv)
         a_df = pd.read_csv(a_camera_csv)
+        direct_a_to_nd_offset_ms = _estimate_direct_camera_offset(
+            reference_df=nd_df,
+            moving_df=a_df,
+            search_ms=args.search_ms,
+            rate_hz=args.rate_hz,
+        )
 
         if args.offset_ms is not None:
-            offset_ms = args.offset_ms
+            nd_offset_ms = float(args.offset_ms)
+            a_offset_ms = float(args.offset_ms)
         else:
             try:
-                offset_ms = estimate_camera_to_mocopi_offset(
+                nd_offset_ms = estimate_camera_to_mocopi_offset(
                     seq,
                     nd_df,
                     args.search_ms,
                     args.rate_hz,
                     None,
                 )
+                a_offset_ms = estimate_camera_to_mocopi_offset(
+                    seq,
+                    a_df,
+                    args.search_ms,
+                    args.rate_hz,
+                    None,
+                )
             except NoCameraPoseDataError:
-                print(f"[{pair.tag}] ND camera CSV has no usable pose landmarks; skipping triplet video.")
+                print(f"[{pair.tag}] A or ND camera CSV has no usable pose landmarks; skipping triplet video.")
                 continue
-            print(f"[{pair.tag}] Estimated offset {offset_ms:.1f} ms")
+            if direct_a_to_nd_offset_ms is None:
+                print(f"[{pair.tag}] Estimated offsets ND={nd_offset_ms:.1f} ms, A={a_offset_ms:.1f} ms")
+            else:
+                print(
+                    f"[{pair.tag}] Estimated offsets ND={nd_offset_ms:.1f} ms, A={a_offset_ms:.1f} ms, "
+                    f"A->ND={direct_a_to_nd_offset_ms:.1f} ms"
+                )
 
         t_m_ms, mocopi_positions = prepare_mocopi_positions(seq)
         nd_landmarks = prepare_camera_landmarks(nd_df)
@@ -938,11 +1094,36 @@ def run_triplet_video(args: argparse.Namespace) -> None:
         width_a, height_a = _rotated_video_size(raw_width_a, raw_height_a, a_rotation_code)
         width_nd, height_nd = _rotated_video_size(raw_width_nd, raw_height_nd, nd_rotation_code)
 
-        fps = cap_nd.get(cv2.CAP_PROP_FPS) or cap_a.get(cv2.CAP_PROP_FPS) or 30.0
-        frame_count = int(cap_nd.get(cv2.CAP_PROP_FRAME_COUNT)) or len(nd_landmarks)
-        frame_count = min(frame_count, int(cap_a.get(cv2.CAP_PROP_FRAME_COUNT)) or frame_count)
+        fps_nd = cap_nd.get(cv2.CAP_PROP_FPS) or 30.0
+        fps_a = cap_a.get(cv2.CAP_PROP_FPS) or fps_nd
+        fps = fps_nd or fps_a or 30.0
+        frame_count_nd = int(cap_nd.get(cv2.CAP_PROP_FRAME_COUNT)) or max(len(nd_landmarks), 1)
+        frame_count_a = int(cap_a.get(cv2.CAP_PROP_FRAME_COUNT)) or max(len(a_landmarks), 1)
+        nd_frame_timestamps_ms = _build_frame_timestamps(nd_df, frame_count_nd, fps_nd)
+        a_frame_timestamps_ms = _build_frame_timestamps(a_df, frame_count_a, fps_a)
+        nd_mocopi_timestamps_ms = nd_frame_timestamps_ms + nd_offset_ms
+        a_mocopi_timestamps_ms = a_frame_timestamps_ms + a_offset_ms
+        common_start_ms = max(
+            float(t_m_ms[0]),
+            float(nd_mocopi_timestamps_ms[0]),
+            float(a_mocopi_timestamps_ms[0]),
+        )
+        common_end_ms = min(
+            float(t_m_ms[-1]),
+            float(nd_mocopi_timestamps_ms[-1]),
+            float(a_mocopi_timestamps_ms[-1]),
+        )
+        render_nd_indices = np.flatnonzero(
+            (nd_mocopi_timestamps_ms >= common_start_ms) & (nd_mocopi_timestamps_ms <= common_end_ms)
+        )
+        if render_nd_indices.size == 0:
+            print(f"[{pair.tag}] No overlapping A/ND/Mocopi timeline after offset estimation; skipping.")
+            cap_a.release()
+            cap_nd.release()
+            continue
         if args.max_frames is not None:
-            frame_count = min(frame_count, args.max_frames)
+            render_nd_indices = render_nd_indices[: args.max_frames]
+        frame_count = int(render_nd_indices.size)
 
         panel_height = max(height_a, height_nd)
         panel_width_a = max(1, int(round(width_a * (panel_height / max(height_a, 1)))))
@@ -965,27 +1146,47 @@ def run_triplet_video(args: argparse.Namespace) -> None:
 
         draw_overlay_a = not _is_processed_video(a_video_path)
         draw_overlay_nd = not _is_processed_video(nd_video_path)
+        last_a_idx: int | None = None
+        last_nd_idx: int | None = None
+        if direct_a_to_nd_offset_ms is None:
+            offset_text = f"offset ND {nd_offset_ms:+0.0f} ms | A {a_offset_ms:+0.0f} ms"
+        else:
+            offset_text = (
+                f"offset ND {nd_offset_ms:+0.0f} ms | A {a_offset_ms:+0.0f} ms | "
+                f"A->ND {direct_a_to_nd_offset_ms:+0.0f} ms"
+            )
 
-        for frame_idx in range(frame_count):
-            ret_a, frame_a = cap_a.read()
-            ret_nd, frame_nd = cap_nd.read()
+        for output_idx, nd_frame_idx in enumerate(render_nd_indices):
+            t_nd_ms = float(nd_frame_timestamps_ms[nd_frame_idx])
+            t_mocopi_ms = float(nd_mocopi_timestamps_ms[nd_frame_idx])
+            target_a_time_ms = t_mocopi_ms - a_offset_ms
+            a_frame_idx = _nearest_frame_index(a_frame_timestamps_ms, target_a_time_ms)
+
+            ret_nd, frame_nd, last_nd_idx = _read_frame_at_index(
+                cap_nd,
+                int(nd_frame_idx),
+                rotation_code=nd_rotation_code,
+                last_idx=last_nd_idx,
+            )
+            ret_a, frame_a, last_a_idx = _read_frame_at_index(
+                cap_a,
+                int(a_frame_idx),
+                rotation_code=a_rotation_code,
+                last_idx=last_a_idx,
+            )
             if not ret_a or not ret_nd:
                 break
 
-            frame_a = rotate_frame(frame_a, a_rotation_code)
-            frame_nd = rotate_frame(frame_nd, nd_rotation_code)
-
             left = frame_a.copy()
             middle = frame_nd.copy()
-            lms_a = a_landmarks.get(frame_idx)
-            lms_nd = nd_landmarks.get(frame_idx)
+            lms_a = a_landmarks.get(int(a_frame_idx))
+            lms_nd = nd_landmarks.get(int(nd_frame_idx))
             if lms_a and draw_overlay_a:
                 draw_camera_skeleton(left, lms_a)
             if lms_nd and draw_overlay_nd:
                 draw_camera_skeleton(middle, lms_nd)
 
-            t_cam_ms = _timestamp_for_frame(nd_df, frame_idx, lms_nd, fps)
-            t_mocopi_ms = t_cam_ms + offset_ms
+            t_a_ms = float(a_frame_timestamps_ms[a_frame_idx])
 
             right = np.zeros((panel_height, mocopi_width, 3), dtype=np.uint8)
             draw_mocopi_skeleton(right, mocopi_positions, t_mocopi_ms, t_m_ms, view=args.mocopi_view)
@@ -993,8 +1194,8 @@ def run_triplet_video(args: argparse.Namespace) -> None:
             left_resized = _resize_to_height(left, panel_height)
             middle_resized = _resize_to_height(middle, panel_height)
 
-            left_subtitle = f"t={t_cam_ms / 1000.0:0.2f}s | {a_source}"
-            nd_subtitle = f"t={t_cam_ms / 1000.0:0.2f}s | {nd_source}"
+            left_subtitle = f"t={t_a_ms / 1000.0:0.2f}s | {a_source}"
+            nd_subtitle = f"t={t_nd_ms / 1000.0:0.2f}s | {nd_source}"
             _draw_panel_chrome(
                 left_resized,
                 title="Camera A",
@@ -1031,10 +1232,10 @@ def run_triplet_video(args: argparse.Namespace) -> None:
             _draw_combined_chrome(
                 combined,
                 panel_width=panel_width_a,
-                frame_idx=frame_idx,
-                camera_time_ms=t_cam_ms,
+                frame_idx=output_idx,
+                camera_time_ms=t_nd_ms,
                 mocopi_time_ms=t_mocopi_ms,
-                offset_ms=offset_ms,
+                offset_text=offset_text,
             )
             out.write(combined)
 
@@ -1075,6 +1276,26 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
     a_image_df = pd.read_csv(a_camera_csv)
     nd_df = pd.read_csv(nd_projection_csv)
     a_df = pd.read_csv(a_projection_csv)
+    direct_a_to_nd_offset_ms = _estimate_direct_camera_offset(
+        reference_df=nd_image_df,
+        moving_df=a_image_df,
+        search_ms=args.search_ms,
+        rate_hz=args.rate_hz,
+    )
+    try:
+        nd_offset_ms, a_offset_ms, offset_label = _resolve_fourpanel_offsets(
+            seq,
+            nd_image_df=nd_image_df,
+            a_image_df=a_image_df,
+            offset_ms=args.offset_ms,
+            search_ms=args.search_ms,
+            rate_hz=args.rate_hz,
+        )
+    except NoCameraPoseDataError as exc:
+        raise SystemExit("Cannot estimate four-panel offset because one camera CSV has no usable image-space pose landmarks.") from exc
+    except RuntimeError as exc:
+        raise SystemExit(f"Could not estimate four-panel offset: {exc}") from exc
+
     plot_component = args.plot_component or ("z" if args.camera_space == "world" else "y")
     component_index = COMPONENT_INDEX[plot_component]
     try:
@@ -1104,21 +1325,13 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
     t_nd_ms, nd_pos = nd_projection.timestamps_ms, nd_projection.positions
     t_a_ms, a_pos = a_projection.timestamps_ms, a_projection.positions
 
-    if args.offset_ms:
-        t_nd_ms = t_nd_ms + args.offset_ms
-        t_a_ms = t_a_ms + args.offset_ms
-
-    if args.offset_ms:
-        t_shift = args.offset_ms
-        t_m_ms = t_m_ms - t_shift
-        t_nd_ms = t_nd_ms - t_shift
-        t_a_ms = t_a_ms - t_shift
+    t_nd_ms = t_nd_ms + nd_offset_ms
+    t_a_ms = t_a_ms + a_offset_ms
 
     t_nd_count, nd_percent = visibility_percent(nd_image_df, args.visibility_threshold)
     t_a_count, a_percent = visibility_percent(a_image_df, args.visibility_threshold)
-    if args.offset_ms:
-        t_nd_count = t_nd_count + args.offset_ms - t_shift
-        t_a_count = t_a_count + args.offset_ms - t_shift
+    t_nd_count = t_nd_count + nd_offset_ms
+    t_a_count = t_a_count + a_offset_ms
 
     fig, axes = plt.subplots(4, 1, figsize=(6, 4), sharex=True)
     ax_mocopi, ax_a, ax_nd, ax_vis = axes
@@ -1229,7 +1442,7 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
             pair.tag,
             camera_space=args.camera_space,
             component=plot_component,
-            offset_ms=args.offset_ms,
+            offset_label=offset_label,
             visibility_threshold=args.visibility_threshold,
         ).output_plot
     else:
@@ -1239,7 +1452,10 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
     plt.close(fig)
     print(
         f"Saved four-panel plot to {output_path} "
-        f"(camera_space={args.camera_space}, component=d{plot_component}, offset_ms={args.offset_ms:.1f}, visibility_threshold={args.visibility_threshold:.2f})"
+        f"(camera_space={args.camera_space}, component=d{plot_component}, "
+        f"ND_offset_ms={nd_offset_ms:.1f}, A_offset_ms={a_offset_ms:.1f}, "
+        f"A_to_ND_offset_ms={direct_a_to_nd_offset_ms if direct_a_to_nd_offset_ms is not None else float('nan'):.1f}, "
+        f"visibility_threshold={args.visibility_threshold:.2f})"
     )
 
 
