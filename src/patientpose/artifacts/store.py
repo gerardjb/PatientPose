@@ -11,6 +11,7 @@ class PreprocessVideoArtifacts:
     annotated_video: Path
     plain_video: Path
     landmarks_csv: Path
+    pose_world_csv: Path
     frame_summary_csv: Path
     metadata_json: Path
 
@@ -20,6 +21,7 @@ class QualityVideoArtifacts:
     annotated_video: Path
     plain_video: Path
     landmarks_csv: Path
+    pose_world_csv: Path
     position_plot: Path
     quality_plot: Path
     metadata_json: Path
@@ -72,6 +74,7 @@ class ArtifactStore:
             annotated_video=self.paths.output_videos / f"deidentified_{stem}.avi",
             plain_video=self.paths.output_videos / f"deidentified_no_keypoints_{stem}.avi",
             landmarks_csv=self.paths.output_csvs / f"landmarks_{stem}.csv",
+            pose_world_csv=self.paths.output_csvs / f"pose_world_{stem}.csv",
             frame_summary_csv=self.paths.output_csvs / f"landmarks_summary_{stem}.csv",
             metadata_json=self.paths.output_csvs / f"landmarks_metadata_{stem}.json",
         )
@@ -82,18 +85,19 @@ class ArtifactStore:
             annotated_video=self.paths.output_videos / f"quality_vis_{stem}.avi",
             plain_video=self.paths.output_videos / f"quality_vis_no_keypoints_{stem}.avi",
             landmarks_csv=self.paths.output_csvs / f"landmarks_{stem}.csv",
+            pose_world_csv=self.paths.output_csvs / f"pose_world_{stem}.csv",
             position_plot=self.paths.output_plots / f"fingertip_position_{stem}.png",
             quality_plot=self.paths.output_plots / f"fingertip_quality_{stem}.png",
             metadata_json=self.paths.output_csvs / f"landmarks_metadata_{stem}.json",
         )
 
-    def pair_report(self) -> PairReportArtifacts:
+    def pair_report(self, camera_space: str) -> PairReportArtifacts:
         output_dir = self.paths.results / "mocopi_reliability"
         return PairReportArtifacts(
             output_dir=output_dir,
-            plot_dir=output_dir / "plots",
-            summary_csv=output_dir / "nd_delta_summary.csv",
-            ratio_plot=output_dir / "nd_ratio_summary.pdf",
+            plot_dir=output_dir / "plots" / camera_space,
+            summary_csv=output_dir / f"nd_delta_summary_{camera_space}.csv",
+            ratio_plot=output_dir / f"nd_ratio_summary_{camera_space}.pdf",
         )
 
     def side_by_side(self) -> SideBySideArtifacts:
@@ -112,18 +116,20 @@ class ArtifactStore:
         self,
         tag: str,
         *,
+        camera_space: str,
+        component: str,
         offset_ms: float,
         visibility_threshold: float,
     ) -> FourpanelTripletArtifacts:
         return FourpanelTripletArtifacts(
             output_plot=self.paths.output_plots
-            / f"fourpanel_{tag}_offset_{offset_ms:.1f}ms_vis_{visibility_threshold:.2f}.pdf",
+            / f"fourpanel_{tag}_{camera_space}_d{component}_offset_{offset_ms:.1f}ms_vis_{visibility_threshold:.2f}.pdf",
         )
 
-    def egocentric_diagnostics(self, stem: str, frame_mode: str) -> EgocentricDiagnosticsArtifacts:
+    def egocentric_diagnostics(self, stem: str, frame_mode: str, space: str) -> EgocentricDiagnosticsArtifacts:
         output_dir = self.paths.results / "Diagnostics" / "egocentric"
         return EgocentricDiagnosticsArtifacts(
             output_dir=output_dir,
-            components_plot=output_dir / f"{stem}_{frame_mode}_components.pdf",
-            overlay_video=output_dir / f"{stem}_{frame_mode}_overlay.avi",
+            components_plot=output_dir / f"{stem}_{space}_{frame_mode}_components.pdf",
+            overlay_video=output_dir / f"{stem}_{space}_{frame_mode}_overlay.avi",
         )

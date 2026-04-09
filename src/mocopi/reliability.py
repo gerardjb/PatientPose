@@ -13,25 +13,32 @@ from typing import Iterable, Sequence
 import numpy as np
 import pandas as pd
 
-from .features import (
-    NoCameraPoseDataError,
-    compute_camera_egocentric_positions,
-    compute_egocentric_positions,
-)
-from .sync import clean_feature_samples, estimate_camera_to_mocopi_offset
+from .camera_projection import CameraProjectionConfig, compute_camera_projection
+from .features import NoCameraPoseDataError, compute_egocentric_positions
 from .recording_io import load_mocopi_recording
+from .sync import estimate_camera_to_mocopi_offset
 
 SCALE_REF_JOINTS = ["l_up_leg", "r_up_leg", "l_shoulder", "r_shoulder"]
+COMPONENT_INDEX = {"x": 0, "y": 1, "z": 2}
 RELIABILITY_COLUMNS = [
     "time_s",
     "joint",
     "landmark",
+    "camera_space",
+    "comparison_components",
     "error_2d",
+    "error_3d",
     "mocopi_dx",
     "mocopi_dy",
+    "mocopi_dz",
     "camera_dx",
     "camera_dy",
+    "camera_dz",
 ]
+
+
+def default_comparison_components(camera_space: str) -> tuple[str, str]:
+    return ("y", "z") if camera_space == "world" else ("x", "y")
 
 
 def compute_body_scale_series(
@@ -61,52 +68,75 @@ def export_reliability_errors(
     joints: Sequence[str],
     landmarks: Sequence[str],
     offset_ms: float,
+    *,
+    camera_space: str = "world",
+    comparison_components: tuple[str, str] | None = None,
+    visibility_threshold: float | None = 0.4,
 ) -> pd.DataFrame:
     """
     Compute per-frame Mocopi vs camera egocentric errors for joint/landmark pairs.
     """
     if len(joints) != len(landmarks):
         raise ValueError("Expected joints and landmarks to have the same length")
+    if camera_space not in {"image", "world"}:
+        raise ValueError(f"Unsupported camera space: {camera_space!r}")
+    if comparison_components is None:
+        comparison_components = default_comparison_components(camera_space)
 
     request_joints = list(dict.fromkeys([*joints, *SCALE_REF_JOINTS]))
     t_m_ms, mocopi_pos = compute_egocentric_positions(seq, request_joints)
-    t_c_ms, camera_pos = compute_camera_egocentric_positions(cam_df, landmarks)
+    projection = compute_camera_projection(
+        cam_df,
+        landmarks,
+        CameraProjectionConfig(
+            space=camera_space,
+            visibility_threshold=visibility_threshold,
+            rotate_to_body_frame=(camera_space == "image"),
+        ),
+    )
 
-    t_c_aligned_ms = t_c_ms + offset_ms
+    t_c_aligned_ms = projection.timestamps_ms + offset_ms
     scales = compute_body_scale_series(mocopi_pos)
+    comp_a, comp_b = comparison_components
+    idx_a = COMPONENT_INDEX[comp_a]
+    idx_b = COMPONENT_INDEX[comp_b]
 
     records: list[dict] = []
 
     for j_name, lm_name in zip(joints, landmarks):
-        if j_name not in mocopi_pos or lm_name not in camera_pos:
+        if j_name not in mocopi_pos or lm_name not in projection.positions:
             continue
 
-        m_traj = mocopi_pos[j_name]
-        c_traj = camera_pos[lm_name]
+        m_traj = mocopi_pos[j_name] / scales[:, None]
+        c_traj = projection.positions[lm_name]
 
         cx = np.interp(t_m_ms, t_c_aligned_ms, c_traj[:, 0], left=np.nan, right=np.nan)
         cy = np.interp(t_m_ms, t_c_aligned_ms, c_traj[:, 1], left=np.nan, right=np.nan)
+        cz = np.interp(t_m_ms, t_c_aligned_ms, c_traj[:, 2], left=np.nan, right=np.nan)
 
-        mx = m_traj[:, 0] / scales
-        my = m_traj[:, 1] / scales
+        camera_stack = np.column_stack([cx, cy, cz])
+        diff = m_traj - camera_stack
+        err_2d = np.sqrt(diff[:, idx_a] ** 2 + diff[:, idx_b] ** 2)
+        err_3d = np.sqrt(np.nansum(diff**2, axis=1))
 
-        dx = mx - cx
-        dy = my - cy
-        err = np.sqrt(dx**2 + dy**2)
-
-        for t_ms, err_i, mx_i, my_i, cx_i, cy_i in zip(t_m_ms, err, mx, my, cx, cy):
-            if np.isnan(err_i):
+        for t_ms, err2_i, err3_i, mocopi_i, camera_i in zip(t_m_ms, err_2d, err_3d, m_traj, camera_stack):
+            if np.isnan(err2_i):
                 continue
             records.append(
                 {
                     "time_s": t_ms / 1000.0,
                     "joint": j_name,
                     "landmark": lm_name,
-                    "error_2d": float(err_i),
-                    "mocopi_dx": float(mx_i),
-                    "mocopi_dy": float(my_i),
-                    "camera_dx": float(cx_i),
-                    "camera_dy": float(cy_i),
+                    "camera_space": camera_space,
+                    "comparison_components": "".join(comparison_components),
+                    "error_2d": float(err2_i),
+                    "error_3d": float(err3_i) if np.isfinite(err3_i) else np.nan,
+                    "mocopi_dx": float(mocopi_i[0]),
+                    "mocopi_dy": float(mocopi_i[1]),
+                    "mocopi_dz": float(mocopi_i[2]),
+                    "camera_dx": float(camera_i[0]),
+                    "camera_dy": float(camera_i[1]),
+                    "camera_dz": float(camera_i[2]),
                 }
             )
 
@@ -120,6 +150,11 @@ def ensure_reliability_csv(
     offset_ms: float | None,
     search_ms: float,
     rate_hz: float,
+    *,
+    offset_camera_csv: Path | None = None,
+    camera_space: str = "world",
+    comparison_components: tuple[str, str] | None = None,
+    visibility_threshold: float | None = 0.4,
     clip_start_s: float | None = None,
     clip_end_s: float | None = None,
 ) -> Path:
@@ -131,10 +166,11 @@ def ensure_reliability_csv(
 
     seq = load_mocopi_recording(motion_source)
     cam_df = pd.read_csv(camera_csv)
+    offset_cam_df = pd.read_csv(offset_camera_csv) if offset_camera_csv is not None else cam_df
     try:
         offset_used = estimate_camera_to_mocopi_offset(
             seq,
-            cam_df,
+            offset_cam_df,
             search_ms,
             rate_hz,
             offset_ms,
@@ -147,6 +183,9 @@ def ensure_reliability_csv(
             ["l_foot", "r_foot", "l_hand", "r_hand"],
             ["LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_WRIST", "RIGHT_WRIST"],
             offset_used,
+            camera_space=camera_space,
+            comparison_components=comparison_components,
+            visibility_threshold=visibility_threshold,
         )
     except NoCameraPoseDataError:
         df_out = pd.DataFrame(columns=RELIABILITY_COLUMNS)
@@ -162,13 +201,27 @@ def nd_factor_from_stem(stem: str) -> float:
     return mapping.get(letter.lower(), 1.0)
 
 
-def best_joint_from_reliability(df_or_path: Path | pd.DataFrame) -> str | None:
+def best_joint_from_reliability(
+    df_or_path: Path | pd.DataFrame,
+    *,
+    component: str | None = None,
+) -> str | None:
     df = pd.read_csv(df_or_path) if isinstance(df_or_path, (str, Path)) else df_or_path
+    if df.empty:
+        return None
+    camera_space = str(df["camera_space"].iloc[0]) if "camera_space" in df.columns else "image"
+    if component is None:
+        component = "z" if camera_space == "world" else "y"
+    camera_col = {"x": "camera_dx", "y": "camera_dy", "z": "camera_dz"}[component]
+    mocopi_col = {"x": "mocopi_dx", "y": "mocopi_dy", "z": "mocopi_dz"}[component]
+
     best_joint = None
     best_abs_corr = -np.inf
     for joint, sub in df.groupby("joint"):
-        moc = sub["mocopi_dy"]
-        cam = sub["camera_dy"]
+        if mocopi_col not in sub.columns or camera_col not in sub.columns:
+            continue
+        moc = sub[mocopi_col]
+        cam = sub[camera_col]
         mask = moc.notna() & cam.notna()
         if mask.sum() < 10:
             continue
@@ -241,14 +294,18 @@ def get_aligned_traces(
     offset_ms: float | None,
     clip_start_s: float | None,
     clip_end_s: float | None,
+    *,
+    camera_space: str = "world",
+    component: str | None = None,
+    visibility_threshold: float | None = 0.4,
 ) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, np.ndarray], float]:
     """
-    Return aligned egocentric ΔY traces for Mocopi joints and camera landmarks.
-
-    Returns:
-        t_s, mocopi_y, camera_y, offset_used
-        where t_s is Mocopi time in seconds, and dicts map names to ΔY arrays.
+    Return aligned egocentric component traces for Mocopi joints and camera landmarks.
     """
+    if component is None:
+        component = "z" if camera_space == "world" else "y"
+    comp_idx = COMPONENT_INDEX[component]
+
     seq = load_mocopi_recording(motion_source)
     cam_df = pd.read_csv(camera_csv)
 
@@ -256,13 +313,21 @@ def get_aligned_traces(
     t_m_ms, mocopi_pos = compute_egocentric_positions(seq, needed_joints)
     scales = compute_body_scale_series(mocopi_pos)
 
-    mocopi_y: dict[str, np.ndarray] = {}
-    for j in joints:
-        if j not in mocopi_pos:
+    mocopi_component: dict[str, np.ndarray] = {}
+    for joint_name in joints:
+        if joint_name not in mocopi_pos:
             continue
-        mocopi_y[j] = mocopi_pos[j][:, 1] / scales
+        mocopi_component[joint_name] = mocopi_pos[joint_name][:, comp_idx] / scales
 
-    t_c_ms, camera_pos = compute_camera_egocentric_positions(cam_df, landmarks)
+    projection = compute_camera_projection(
+        cam_df,
+        landmarks,
+        CameraProjectionConfig(
+            space=camera_space,
+            visibility_threshold=visibility_threshold,
+            rotate_to_body_frame=(camera_space == "image"),
+        ),
+    )
 
     if offset_ms is None:
         offset_used = estimate_camera_to_mocopi_offset(
@@ -277,15 +342,15 @@ def get_aligned_traces(
     else:
         offset_used = offset_ms
 
-    t_c_aligned = t_c_ms + offset_used
-    camera_y: dict[str, np.ndarray] = {}
-    for lm in landmarks:
-        if lm not in camera_pos:
+    t_c_aligned = projection.timestamps_ms + offset_used
+    camera_component: dict[str, np.ndarray] = {}
+    for landmark_name in landmarks:
+        if landmark_name not in projection.positions:
             continue
-        camera_y[lm] = np.interp(
+        camera_component[landmark_name] = np.interp(
             t_m_ms,
             t_c_aligned,
-            camera_pos[lm][:, 1],
+            projection.positions[landmark_name][:, comp_idx],
             left=np.nan,
             right=np.nan,
         )
@@ -298,18 +363,19 @@ def get_aligned_traces(
             clip_end_s = float(t_s.max())
         mask = (t_s >= clip_start_s) & (t_s <= clip_end_s)
         t_s = t_s[mask]
-        for k in list(mocopi_y.keys()):
-            mocopi_y[k] = mocopi_y[k][mask]
-        for k in list(camera_y.keys()):
-            camera_y[k] = camera_y[k][mask]
+        for key in list(mocopi_component.keys()):
+            mocopi_component[key] = mocopi_component[key][mask]
+        for key in list(camera_component.keys()):
+            camera_component[key] = camera_component[key][mask]
 
-    return t_s, mocopi_y, camera_y, offset_used
+    return t_s, mocopi_component, camera_component, offset_used
 
 
 __all__ = [
     "SCALE_REF_JOINTS",
     "RELIABILITY_COLUMNS",
     "compute_body_scale_series",
+    "default_comparison_components",
     "export_reliability_errors",
     "ensure_reliability_csv",
     "nd_factor_from_stem",

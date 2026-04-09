@@ -21,9 +21,9 @@ from mocopi import (
 )
 from mocopi.features import (
     NoCameraPoseDataError,
-    compute_camera_egocentric_positions,
     compute_egocentric_positions,
 )
+from mocopi.camera_projection import CameraProjectionConfig, compute_camera_projection
 from mocopi.visualization import (
     draw_camera_skeleton,
     draw_mocopi_skeleton,
@@ -33,6 +33,7 @@ from mocopi.visualization import (
 from patientpose.artifacts import ArtifactStore
 from patientpose.config import resolve_project_paths
 from patientpose.datasets import discover_pairs, discover_sessions, infer_camera_csv, parse_camera_role_specs
+from patientpose.landmarks import infer_pose_world_csv
 from video_tools import determine_rotation_code, rotate_frame
 
 
@@ -60,6 +61,7 @@ COLOR_A = "#1d4f8a"
 COLOR_ND = "#ff00ff"
 DEFAULT_FOURPANEL_JOINTS = ["l_foot", "r_foot"]
 DEFAULT_FOURPANEL_LANDMARKS = ["LEFT_ANKLE", "RIGHT_ANKLE"]
+COMPONENT_INDEX = {"x": 0, "y": 1, "z": 2}
 
 
 def add_side_by_side_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -245,6 +247,18 @@ def add_fourpanel_triplet_args(parser: argparse.ArgumentParser) -> argparse.Argu
         type=float,
         default=0.4,
         help="Visibility threshold for camera landmarks.",
+    )
+    parser.add_argument(
+        "--camera-space",
+        choices=("image", "world"),
+        default="world",
+        help="Which camera pose representation to plot.",
+    )
+    parser.add_argument(
+        "--plot-component",
+        choices=("x", "y", "z"),
+        default=None,
+        help="Projected component to plot. Defaults to z for world and y for image.",
     )
     parser.add_argument(
         "--offset-ms",
@@ -480,6 +494,7 @@ def _fourpanel_auto_ylim_from_window(
     t_ms: np.ndarray,
     traces: dict[str, np.ndarray],
     xlim: tuple[float, float],
+    component_index: int,
     padding: float = 0.05,
 ) -> tuple[float, float] | None:
     t_s = t_ms / 1000.0
@@ -490,7 +505,7 @@ def _fourpanel_auto_ylim_from_window(
     for arr in traces.values():
         if arr is None or arr.shape[0] != t_s.shape[0]:
             continue
-        y_vals = arr[:, 1][mask]
+        y_vals = arr[:, component_index][mask]
         y_vals = y_vals[np.isfinite(y_vals)]
         if y_vals.size:
             ys.append(float(np.min(y_vals)))
@@ -530,6 +545,8 @@ def _plot_fourpanel_traces(
     label_text: str,
     xlim: tuple[float, float],
     label_color: str,
+    component_index: int,
+    component_label: str,
 ) -> None:
     t_s = t_ms / 1000.0
     for name, arr in traces.items():
@@ -537,9 +554,9 @@ def _plot_fourpanel_traces(
             continue
         is_right = name.lower().startswith("r_") or name.lower().startswith("right")
         linestyle = "--" if is_right else "-"
-        ax.plot(t_s, arr[:, 1], label=name, color=COLOR_MOCOPI, linestyle=linestyle)
+        ax.plot(t_s, arr[:, component_index], label=name, color=COLOR_MOCOPI, linestyle=linestyle)
     ax.set_ylabel(
-        label_text,
+        f"{label_text}\nd{component_label}",
         color=label_color,
         fontsize=12,
         rotation=0,
@@ -1046,26 +1063,46 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
 
     nd_camera_csv = _camera_csv_for_video(pair.nd_video, paths.root)
     a_camera_csv = _camera_csv_for_video(pair.unfiltered_video, paths.root)
-    if not nd_camera_csv.exists() or not a_camera_csv.exists():
+    nd_projection_csv = nd_camera_csv if args.camera_space == "image" else infer_pose_world_csv(nd_camera_csv, paths.root)
+    a_projection_csv = a_camera_csv if args.camera_space == "image" else infer_pose_world_csv(a_camera_csv, paths.root)
+    if not nd_camera_csv.exists() or not a_camera_csv.exists() or not nd_projection_csv.exists() or not a_projection_csv.exists():
         raise SystemExit(f"Missing camera CSVs for tag={args.tag} (ND: {nd_camera_csv}, A: {a_camera_csv})")
 
     seq = load_mocopi_recording(pair.motion_source)
     t_m_ms, mocopi_pos = compute_egocentric_positions(seq, args.joints)
 
-    nd_df = pd.read_csv(nd_camera_csv)
-    a_df = pd.read_csv(a_camera_csv)
+    nd_image_df = pd.read_csv(nd_camera_csv)
+    a_image_df = pd.read_csv(a_camera_csv)
+    nd_df = pd.read_csv(nd_projection_csv)
+    a_df = pd.read_csv(a_projection_csv)
+    plot_component = args.plot_component or ("z" if args.camera_space == "world" else "y")
+    component_index = COMPONENT_INDEX[plot_component]
     try:
-        t_nd_ms, nd_pos = compute_camera_egocentric_positions(
-            nd_df, args.landmarks, visibility_threshold=args.visibility_threshold
+        nd_projection = compute_camera_projection(
+            nd_df,
+            args.landmarks,
+            CameraProjectionConfig(
+                space=args.camera_space,
+                visibility_threshold=args.visibility_threshold,
+                rotate_to_body_frame=(args.camera_space == "image"),
+            ),
         )
     except NoCameraPoseDataError as exc:
-        raise SystemExit(f"ND camera CSV has no usable pose landmarks: {nd_camera_csv}") from exc
+        raise SystemExit(f"ND camera CSV has no usable {args.camera_space} pose landmarks: {nd_projection_csv}") from exc
     try:
-        t_a_ms, a_pos = compute_camera_egocentric_positions(
-            a_df, args.landmarks, visibility_threshold=args.visibility_threshold
+        a_projection = compute_camera_projection(
+            a_df,
+            args.landmarks,
+            CameraProjectionConfig(
+                space=args.camera_space,
+                visibility_threshold=args.visibility_threshold,
+                rotate_to_body_frame=(args.camera_space == "image"),
+            ),
         )
     except NoCameraPoseDataError as exc:
-        raise SystemExit(f"A camera CSV has no usable pose landmarks: {a_camera_csv}") from exc
+        raise SystemExit(f"A camera CSV has no usable {args.camera_space} pose landmarks: {a_projection_csv}") from exc
+    t_nd_ms, nd_pos = nd_projection.timestamps_ms, nd_projection.positions
+    t_a_ms, a_pos = a_projection.timestamps_ms, a_projection.positions
 
     if args.offset_ms:
         t_nd_ms = t_nd_ms + args.offset_ms
@@ -1077,8 +1114,8 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
         t_nd_ms = t_nd_ms - t_shift
         t_a_ms = t_a_ms - t_shift
 
-    t_nd_count, nd_percent = visibility_percent(nd_df, args.visibility_threshold)
-    t_a_count, a_percent = visibility_percent(a_df, args.visibility_threshold)
+    t_nd_count, nd_percent = visibility_percent(nd_image_df, args.visibility_threshold)
+    t_a_count, a_percent = visibility_percent(a_image_df, args.visibility_threshold)
     if args.offset_ms:
         t_nd_count = t_nd_count + args.offset_ms - t_shift
         t_a_count = t_a_count + args.offset_ms - t_shift
@@ -1110,8 +1147,8 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
     t_a_count, a_percent = _ensure_percent_trace(t_a_count, a_percent, xlim)
     t_nd_count, nd_percent = _ensure_percent_trace(t_nd_count, nd_percent, xlim)
 
-    _plot_fourpanel_traces(ax_mocopi, t_m_ms, mocopi_traces, "Mocopi", xlim, COLOR_MOCOPI)
-    _plot_fourpanel_traces(ax_a, t_a_ms, a_traces, "Video ND\n0", xlim, COLOR_A)
+    _plot_fourpanel_traces(ax_mocopi, t_m_ms, mocopi_traces, "Mocopi", xlim, COLOR_MOCOPI, component_index, plot_component)
+    _plot_fourpanel_traces(ax_a, t_a_ms, a_traces, "Video ND\n0", xlim, COLOR_A, component_index, plot_component)
     _plot_fourpanel_traces(
         ax_nd,
         t_nd_ms,
@@ -1119,6 +1156,8 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
         nd_label_text.replace("Video ND = ", "Video ND\n"),
         xlim,
         COLOR_ND,
+        component_index,
+        plot_component,
     )
 
     for ax, traces, t_ms in (
@@ -1130,7 +1169,7 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
             ymin = args.y_dy_min if args.y_dy_min is not None else ax.get_ylim()[0]
             ymax = args.y_dy_max if args.y_dy_max is not None else ax.get_ylim()[1]
         else:
-            yl = _fourpanel_auto_ylim_from_window(t_ms, traces, xlim)
+            yl = _fourpanel_auto_ylim_from_window(t_ms, traces, xlim, component_index)
             if yl is None:
                 ymin, ymax = ax.get_ylim()
             else:
@@ -1188,6 +1227,8 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
     if args.output is None:
         output_path = artifact_store.fourpanel_triplet(
             pair.tag,
+            camera_space=args.camera_space,
+            component=plot_component,
             offset_ms=args.offset_ms,
             visibility_threshold=args.visibility_threshold,
         ).output_plot
@@ -1198,7 +1239,7 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
     plt.close(fig)
     print(
         f"Saved four-panel plot to {output_path} "
-        f"(offset_ms={args.offset_ms:.1f}, visibility_threshold={args.visibility_threshold:.2f})"
+        f"(camera_space={args.camera_space}, component=d{plot_component}, offset_ms={args.offset_ms:.1f}, visibility_threshold={args.visibility_threshold:.2f})"
     )
 
 

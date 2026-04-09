@@ -7,6 +7,7 @@ import importlib
 os.environ.setdefault("MEDIAPIPE_SKIP_AUDIO", "1")
 
 import mediapipe as mp
+from patientpose.landmarks import IMAGE_SPACE, WORLD_SPACE
 
 try:
     from mediapipe import solutions as _mp_solutions
@@ -381,7 +382,9 @@ def extract_landmarks_for_frame(
     frame_index,
     timestamp_ms,
     hand_result: HandLandmarkerResult,
-    pose_result: PoseLandmarkerResult
+    pose_result: PoseLandmarkerResult,
+    pose_source: str = "full_frame",
+    crop_transform=None,
     ):
     """
     Extracts landmark data from MediaPipe results for a single frame into a list of dicts.
@@ -397,6 +400,7 @@ def extract_landmarks_for_frame(
         Returns an empty list if no landmarks are detected in the frame.
     """
     frame_data = []
+    crop_fields = _crop_transform_fields(crop_transform)
 
     # Process Hand Landmarks
     if HandLandmark and hand_result and hand_result.hand_landmarks:
@@ -414,6 +418,9 @@ def extract_landmarks_for_frame(
                         'landmark_id': landmark_idx, 'landmark_name': landmark_name,
                         'x': landmark.x, 'y': landmark.y, 'z': landmark.z,
                         'visibility': getattr(landmark, "visibility", np.nan),
+                        'coordinate_space': IMAGE_SPACE,
+                        'pose_source': '',
+                        **_crop_transform_fields(None),
                     })
 
     # Process Pose Landmarks
@@ -427,8 +434,76 @@ def extract_landmarks_for_frame(
                     'landmark_id': landmark_idx, 'landmark_name': landmark_name,
                     'x': landmark.x, 'y': landmark.y, 'z': landmark.z,
                     'visibility': getattr(landmark, "visibility", np.nan),
+                    'coordinate_space': IMAGE_SPACE,
+                    'pose_source': pose_source,
+                    **crop_fields,
                 })
 
+    return frame_data
+
+
+def _crop_transform_fields(crop_transform) -> dict[str, float | str]:
+    if crop_transform is None:
+        return {
+            'crop_left': np.nan,
+            'crop_top': np.nan,
+            'crop_width': np.nan,
+            'crop_height': np.nan,
+            'crop_frame_width': np.nan,
+            'crop_frame_height': np.nan,
+            'crop_scale_x': np.nan,
+            'crop_scale_y': np.nan,
+            'crop_scale': np.nan,
+        }
+    return {
+        'crop_left': float(crop_transform.left),
+        'crop_top': float(crop_transform.top),
+        'crop_width': float(crop_transform.width),
+        'crop_height': float(crop_transform.height),
+        'crop_frame_width': float(crop_transform.frame_width),
+        'crop_frame_height': float(crop_transform.frame_height),
+        'crop_scale_x': float(getattr(crop_transform, "scale_x", np.nan)),
+        'crop_scale_y': float(getattr(crop_transform, "scale_y", np.nan)),
+        'crop_scale': float(getattr(crop_transform, "scale", np.nan)),
+    }
+
+
+def extract_pose_world_landmarks_for_frame(
+    frame_index,
+    timestamp_ms,
+    pose_result: PoseLandmarkerResult,
+    pose_source: str = "full_frame",
+    crop_transform=None,
+):
+    frame_data = []
+    if not PoseLandmark or not pose_result:
+        return frame_data
+
+    world_landmarks = getattr(pose_result, "pose_world_landmarks", None)
+    image_landmarks = getattr(pose_result, "pose_landmarks", None)
+    if not world_landmarks:
+        return frame_data
+
+    crop_fields = _crop_transform_fields(crop_transform)
+    for instance_idx, landmarks in enumerate(world_landmarks):
+        image_landmarks_for_instance = None
+        if image_landmarks and instance_idx < len(image_landmarks):
+            image_landmarks_for_instance = image_landmarks[instance_idx]
+        for landmark_idx, landmark in enumerate(landmarks):
+            landmark_name = POSE_LANDMARK_NAMES.get(landmark_idx, f"UNKNOWN_{landmark_idx}")
+            visibility = getattr(landmark, "visibility", np.nan)
+            if np.isnan(visibility) and image_landmarks_for_instance and landmark_idx < len(image_landmarks_for_instance):
+                visibility = getattr(image_landmarks_for_instance[landmark_idx], "visibility", np.nan)
+            frame_data.append({
+                'frame': frame_index, 'timestamp_ms': timestamp_ms, 'source': 'pose',
+                'instance_id': instance_idx, 'handedness': 'N/A',
+                'landmark_id': landmark_idx, 'landmark_name': landmark_name,
+                'x': landmark.x, 'y': landmark.y, 'z': landmark.z,
+                'visibility': visibility,
+                'coordinate_space': WORLD_SPACE,
+                'pose_source': pose_source,
+                **crop_fields,
+            })
     return frame_data
 
 def extract_points_for_fingertap(result: HandLandmarkerResult):

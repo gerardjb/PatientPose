@@ -19,11 +19,18 @@ import matplotlib.pyplot as plt
 from analysis_tools.landmark_utils import (
     INDEX_FINGER_TIP_INDEX,
     THUMB_TIP_INDEX,
+    extract_pose_world_landmarks_for_frame,
     extract_landmarks_for_frame,
 )
 from image_overlays import draw_pose_landmarks
 from patientpose.artifacts import ArtifactStore, PreprocessVideoArtifacts, QualityVideoArtifacts
 from patientpose.config import ProjectPaths, resolve_project_paths
+from patientpose.landmarks import (
+    FRAME_SUMMARY_COLUMNS,
+    IMAGE_LANDMARK_COLUMNS,
+    QUALITY_LANDMARK_COLUMNS,
+    WORLD_LANDMARK_COLUMNS,
+)
 from video_tools import blur_face_with_pose, determine_rotation_code, rotate_frame
 from video_tools.image_quality_utils import (
     calculate_confidence_score,
@@ -51,34 +58,6 @@ PoseLandmarker = mp.tasks.vision.PoseLandmarker
 PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
-LANDMARK_COLUMNS = [
-    "frame",
-    "timestamp_ms",
-    "source",
-    "instance_id",
-    "handedness",
-    "landmark_id",
-    "landmark_name",
-    "x",
-    "y",
-    "z",
-    "visibility",
-]
-FRAME_SUMMARY_COLUMNS = [
-    "frame",
-    "timestamp_ms",
-    "pose_detected",
-    "num_pose_landmarks",
-    "hand_detected",
-    "num_hand_landmarks",
-    "pose_quality_score",
-]
-QUALITY_LANDMARK_COLUMNS = [
-    *LANDMARK_COLUMNS,
-    "laplacian_variance",
-    "mean_motion_diff",
-    "quality_score",
-]
 ROTATION_LABELS = {
     None: "none",
     cv2.ROTATE_90_CLOCKWISE: "90cw",
@@ -101,6 +80,32 @@ def _rotation_label(rotation_code: int | None) -> str:
     return ROTATION_LABELS.get(rotation_code, "unknown")
 
 
+def _crop_summary_fields(crop_transform) -> dict[str, float]:
+    if crop_transform is None:
+        return {
+            "crop_left": float("nan"),
+            "crop_top": float("nan"),
+            "crop_width": float("nan"),
+            "crop_height": float("nan"),
+            "crop_frame_width": float("nan"),
+            "crop_frame_height": float("nan"),
+            "crop_scale_x": float("nan"),
+            "crop_scale_y": float("nan"),
+            "crop_scale": float("nan"),
+        }
+    return {
+        "crop_left": float(crop_transform.left),
+        "crop_top": float(crop_transform.top),
+        "crop_width": float(crop_transform.width),
+        "crop_height": float(crop_transform.height),
+        "crop_frame_width": float(crop_transform.frame_width),
+        "crop_frame_height": float(crop_transform.frame_height),
+        "crop_scale_x": float(crop_transform.scale_x),
+        "crop_scale_y": float(crop_transform.scale_y),
+        "crop_scale": float(crop_transform.scale),
+    }
+
+
 def _write_processing_metadata(
     *,
     video_path: Path,
@@ -109,6 +114,7 @@ def _write_processing_metadata(
     mode: str,
     orientation_source: str,
     landmarks_csv: Path,
+    pose_world_csv: Path | None,
     annotated_video: Path,
     plain_video: Path,
     extra: dict | None = None,
@@ -120,6 +126,7 @@ def _write_processing_metadata(
         "orientation_source": orientation_source,
         "rotation_label": _rotation_label(rotation_code),
         "landmarks_csv": str(landmarks_csv.resolve()),
+        "pose_world_csv": str(pose_world_csv.resolve()) if pose_world_csv is not None else None,
         "annotated_video": str(annotated_video.resolve()),
         "plain_video": str(plain_video.resolve()),
     }
@@ -298,6 +305,7 @@ def process_video(
 
     frame_index = 0
     all_landmarks: List[dict] = []
+    all_world_landmarks: List[dict] = []
     frame_summaries: List[dict] = []
 
     focus_tracker = PoseFocusTracker(pose_focus_hint) if pose_focus_hint else None
@@ -327,19 +335,23 @@ def process_video(
             pose_result = posemarker.detect_for_video(mp_frame, timestamp_ms)
             pose_quality = pose_quality_scorer.score(pose_result) if pose_result.pose_landmarks else None
 
+            pose_source = "full_frame"
+            crop_transform = None
+
             if (not pose_result.pose_landmarks or not (pose_quality and pose_quality.is_good)) and focus_tracker:
                 bbox = focus_tracker.current_bbox()
                 if bbox:
                     crop_data = crop_frame_from_bbox(frame_rgb, bbox)
                     if crop_data:
-                        crop_rgb, transform = crop_data
+                        crop_rgb, crop_transform = crop_data
                         crop_rgb = np.ascontiguousarray(crop_rgb)
                         mp_crop = mp.Image(image_format=mp.ImageFormat.SRGB, data=crop_rgb)
                         crop_result = posemarker_image.detect(mp_crop)
                         if crop_result.pose_landmarks:
-                            remap_landmarks_from_crop(crop_result.pose_landmarks[0], transform)
+                            remap_landmarks_from_crop(crop_result.pose_landmarks[0], crop_transform)
                             pose_result = crop_result
                             pose_quality = pose_quality_scorer.score(pose_result)
+                            pose_source = "focus_crop"
 
             if focus_tracker:
                 if pose_result.pose_landmarks:
@@ -347,8 +359,23 @@ def process_video(
                 else:
                     focus_tracker.register_failure()
 
-            frame_landmarks = extract_landmarks_for_frame(frame_index, timestamp_ms, hand_result, pose_result)
+            frame_landmarks = extract_landmarks_for_frame(
+                frame_index,
+                timestamp_ms,
+                hand_result,
+                pose_result,
+                pose_source=pose_source,
+                crop_transform=crop_transform,
+            )
+            frame_world_landmarks = extract_pose_world_landmarks_for_frame(
+                frame_index,
+                timestamp_ms,
+                pose_result,
+                pose_source=pose_source,
+                crop_transform=crop_transform,
+            )
             all_landmarks.extend(frame_landmarks)
+            all_world_landmarks.extend(frame_world_landmarks)
             num_pose_landmarks = 0
             if pose_result.pose_landmarks:
                 num_pose_landmarks = sum(len(landmarks) for landmarks in pose_result.pose_landmarks)
@@ -364,6 +391,8 @@ def process_video(
                     "hand_detected": bool(hand_result.hand_landmarks),
                     "num_hand_landmarks": int(num_hand_landmarks),
                     "pose_quality_score": _pose_quality_value(pose_quality),
+                    "pose_source": pose_source if pose_result.pose_landmarks else "missing",
+                    **_crop_summary_fields(crop_transform if pose_source == "focus_crop" else None),
                 }
             )
 
@@ -380,12 +409,19 @@ def process_video(
     writer.release()
     plain_writer.release()
 
-    landmarks_df = pd.DataFrame(all_landmarks, columns=LANDMARK_COLUMNS)
+    landmarks_df = pd.DataFrame(all_landmarks, columns=IMAGE_LANDMARK_COLUMNS)
     landmarks_df.to_csv(artifacts.landmarks_csv, index=False)
     if all_landmarks:
         print(f"Landmark data saved to {artifacts.landmarks_csv}")
     else:
         print(f"No landmarks detected; wrote empty landmark CSV to {artifacts.landmarks_csv}")
+
+    world_landmarks_df = pd.DataFrame(all_world_landmarks, columns=WORLD_LANDMARK_COLUMNS)
+    world_landmarks_df.to_csv(artifacts.pose_world_csv, index=False)
+    if all_world_landmarks:
+        print(f"World-space pose data saved to {artifacts.pose_world_csv}")
+    else:
+        print(f"No world-space pose data detected; wrote empty pose-world CSV to {artifacts.pose_world_csv}")
 
     frame_summary_df = pd.DataFrame(frame_summaries, columns=FRAME_SUMMARY_COLUMNS)
     frame_summary_df.to_csv(artifacts.frame_summary_csv, index=False)
@@ -398,6 +434,7 @@ def process_video(
         mode="preprocess-video",
         orientation_source=orientation_source,
         landmarks_csv=artifacts.landmarks_csv,
+        pose_world_csv=artifacts.pose_world_csv,
         annotated_video=artifacts.annotated_video,
         plain_video=artifacts.plain_video,
         extra={"frame_summary_csv": str(artifacts.frame_summary_csv.resolve())},
@@ -725,6 +762,9 @@ def process_quality_video(
     else:
         print(f"No landmark data was collected; wrote empty landmark CSV to: {artifacts.landmarks_csv}")
 
+    pd.DataFrame(columns=WORLD_LANDMARK_COLUMNS).to_csv(artifacts.pose_world_csv, index=False)
+    print(f"Wrote empty pose-world CSV to: {artifacts.pose_world_csv}")
+
     _write_processing_metadata(
         video_path=video_path,
         rotation_code=rotation_code,
@@ -732,6 +772,7 @@ def process_quality_video(
         mode="preprocess-quality-video",
         orientation_source=orientation_source,
         landmarks_csv=artifacts.landmarks_csv,
+        pose_world_csv=artifacts.pose_world_csv,
         annotated_video=artifacts.annotated_video,
         plain_video=artifacts.plain_video,
         extra={

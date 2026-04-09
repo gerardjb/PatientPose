@@ -35,6 +35,7 @@ from .nd_pilot import (
 from .reliability import (
     SCALE_REF_JOINTS,
     compute_body_scale_series,
+    default_comparison_components,
     export_reliability_errors,
     ensure_reliability_csv,
     nd_factor_from_stem,
@@ -85,6 +86,7 @@ __all__ = [
     "resolve_session_pair",
     "SCALE_REF_JOINTS",
     "compute_body_scale_series",
+    "default_comparison_components",
     "export_reliability_errors",
     "ensure_reliability_csv",
     "nd_factor_from_stem",

@@ -319,7 +319,7 @@ def render_projection_overlay_video(
                 _draw_full_pose_skeleton(frame, pose_landmarks)
 
             origin = result.origin_xy[row_idx]
-            if np.all(np.isfinite(origin)):
+            if result.space == "image" and np.all(np.isfinite(origin)):
                 ox = int(origin[0] * width)
                 oy = int(origin[1] * height)
                 cv2.circle(frame, (ox, oy), 6, (0, 220, 255), -1)
@@ -365,7 +365,7 @@ def render_projection_overlay_video(
                         cv2.LINE_AA,
                     )
 
-                if landmark_name not in result.image_points:
+                if result.space != "image" or landmark_name not in result.image_points:
                     continue
                 pt = result.image_points[landmark_name][row_idx]
                 if np.all(np.isfinite(pt)):
@@ -426,6 +426,17 @@ def render_projection_overlay_video(
                 1,
                 cv2.LINE_AA,
             )
+            if result.space == "world":
+                cv2.putText(
+                    frame,
+                    "Trace panel uses world-space pose; skeleton overlay stays image-space.",
+                    (24, 124),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.54 * max(height / 1080.0, 0.9),
+                    (220, 220, 220),
+                    1,
+                    cv2.LINE_AA,
+                )
 
         cv2.putText(
             frame,

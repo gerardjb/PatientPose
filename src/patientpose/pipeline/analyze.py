@@ -7,13 +7,19 @@ import pandas as pd
 
 from mocopi import load_mocopi_recording
 from mocopi.features import NoCameraPoseDataError
-from mocopi.reliability import RELIABILITY_COLUMNS, ensure_reliability_csv, export_reliability_errors
+from mocopi.reliability import (
+    RELIABILITY_COLUMNS,
+    default_comparison_components,
+    ensure_reliability_csv,
+    export_reliability_errors,
+)
 from mocopi.sync import estimate_camera_to_mocopi_offset
 from patientpose.config import resolve_project_paths
 from patientpose.datasets.discovery import discover_pairs
 from patientpose.datasets.models import TrialPair
 from patientpose.datasets.roles import parse_camera_role_specs
 from patientpose.datasets.session_layout import discover_sessions
+from patientpose.landmarks import infer_pose_world_csv
 
 
 def _resolve_cli_path(path: Path, project_root: Path) -> Path:
@@ -40,6 +46,18 @@ def add_reliability_export_args(parser: argparse.ArgumentParser) -> argparse.Arg
         type=Path,
         required=True,
         help="Path to camera landmarks CSV (results/OutputCSVs).",
+    )
+    parser.add_argument(
+        "--camera-space",
+        choices=("image", "world"),
+        default="world",
+        help="Which pose representation to compare against Mocopi.",
+    )
+    parser.add_argument(
+        "--world-csv",
+        type=Path,
+        default=None,
+        help="Optional explicit path to the pose-world CSV used when --camera-space=world.",
     )
     parser.add_argument(
         "--joints",
@@ -75,7 +93,7 @@ def add_reliability_export_args(parser: argparse.ArgumentParser) -> argparse.Arg
         "--output",
         type=Path,
         default=None,
-        help="Output CSV path. Defaults to <project-root>/results/mocopi_camera_reliability.csv.",
+        help="Output CSV path. Defaults to <project-root>/results/mocopi_camera_reliability_<space>.csv.",
     )
     parser.add_argument(
         "--clip-start",
@@ -109,6 +127,12 @@ def add_reliability_batch_args(parser: argparse.ArgumentParser) -> argparse.Argu
         action="append",
         default=None,
         help="Session-mode camera mapping in the form CAMERA_ID=ROLE, where ROLE is A or ND.",
+    )
+    parser.add_argument(
+        "--camera-space",
+        choices=("image", "world"),
+        default="world",
+        help="Which pose representation to compare against Mocopi.",
     )
     parser.add_argument(
         "--output-dir",
@@ -175,14 +199,22 @@ def run_reliability_export(args: argparse.Namespace) -> None:
     paths = resolve_project_paths(args.project_root)
     motion_source = _resolve_cli_path(args.motion_source, paths.root)
     camera_csv = _resolve_cli_path(args.camera_csv, paths.root)
+    projection_camera_csv = camera_csv
+    if args.camera_space == "world":
+        projection_camera_csv = (
+            _resolve_cli_path(args.world_csv, paths.root)
+            if args.world_csv is not None
+            else infer_pose_world_csv(camera_csv, paths.root)
+        )
     output_csv = (
         _resolve_cli_path(args.output, paths.root)
         if args.output is not None
-        else (paths.results / "mocopi_camera_reliability.csv").resolve()
+        else (paths.results / f"mocopi_camera_reliability_{args.camera_space}.csv").resolve()
     )
 
     seq = load_mocopi_recording(motion_source)
     cam_df = pd.read_csv(camera_csv)
+    projection_df = pd.read_csv(projection_camera_csv)
 
     try:
         offset_ms = compute_or_use_offset(
@@ -194,7 +226,15 @@ def run_reliability_export(args: argparse.Namespace) -> None:
             clip_start_s=args.clip_start,
             clip_end_s=args.clip_end,
         )
-        df_out = export_reliability_errors(seq, cam_df, args.joints, args.landmarks, offset_ms)
+        df_out = export_reliability_errors(
+            seq,
+            projection_df,
+            args.joints,
+            args.landmarks,
+            offset_ms,
+            camera_space=args.camera_space,
+            comparison_components=default_comparison_components(args.camera_space),
+        )
     except NoCameraPoseDataError:
         df_out = pd.DataFrame(columns=RELIABILITY_COLUMNS)
 
@@ -225,24 +265,33 @@ def _run_reliability_for_pair(
     offset_ms: float | None,
     search_ms: float,
     rate_hz: float,
+    *,
+    camera_space: str,
 ) -> None:
     nd_stem = pair.nd_video.stem
     camera_csv = _default_landmarks_csv(nd_stem, project_root)
     if not camera_csv.exists():
         print(f"Skipping {nd_stem}: camera CSV not found at {camera_csv}")
         return
+    projection_camera_csv = camera_csv if camera_space == "image" else infer_pose_world_csv(camera_csv, project_root)
+    if not projection_camera_csv.exists():
+        print(f"Skipping {nd_stem}: {camera_space} camera CSV not found at {projection_camera_csv}")
+        return
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"mocopi_camera_reliability_{nd_stem}.csv"
+    output_path = output_dir / f"mocopi_camera_reliability_{camera_space}_{nd_stem}.csv"
 
-    print(f"Running reliability export for tag {pair.tag} -> {nd_stem}")
+    print(f"Running reliability export for tag {pair.tag} -> {nd_stem} ({camera_space})")
     output_csv = ensure_reliability_csv(
         pair.motion_source,
-        camera_csv,
+        projection_camera_csv,
         output_path,
         offset_ms,
         search_ms,
         rate_hz,
+        offset_camera_csv=camera_csv,
+        camera_space=camera_space,
+        comparison_components=default_comparison_components(camera_space),
     )
     try:
         df = pd.read_csv(output_csv)
@@ -285,6 +334,7 @@ def run_reliability_batch(args: argparse.Namespace) -> None:
             args.offset_ms,
             args.search_ms,
             args.rate_hz,
+            camera_space=getattr(args, "camera_space", "world"),
         )
 
 

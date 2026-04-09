@@ -14,12 +14,14 @@ from mocopi.reliability import (
     RELIABILITY_COLUMNS,
     align_pose_counts,
     best_joint_from_reliability,
+    default_comparison_components,
     ensure_reliability_csv,
     nd_factor_from_stem,
 )
 from patientpose.artifacts import ArtifactStore, PairReportArtifacts
 from patientpose.config import resolve_project_paths
 from patientpose.datasets import discover_pairs, discover_sessions, infer_camera_csv, parse_camera_role_specs
+from patientpose.landmarks import infer_pose_world_csv
 
 
 def add_pair_report_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -40,6 +42,18 @@ def add_pair_report_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     parser.add_argument("--search_ms", type=float, default=5000.0, help="Search range for offset estimation.")
     parser.add_argument("--rate_hz", type=float, default=50.0, help="Resample rate for offset estimation.")
     parser.add_argument(
+        "--camera-space",
+        choices=("image", "world"),
+        default="world",
+        help="Which camera pose representation to report against Mocopi.",
+    )
+    parser.add_argument(
+        "--plot-component",
+        choices=("x", "y", "z"),
+        default=None,
+        help="Component to plot in the pair trace panels. Defaults to z for world and y for image.",
+    )
+    parser.add_argument(
         "--clip_start",
         type=float,
         default=None,
@@ -55,9 +69,7 @@ def add_pair_report_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
 
 
 def build_pair_report_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Per-pair reliability plots and ND-A delta summary."
-    )
+    parser = argparse.ArgumentParser(description="Per-pair reliability plots and ND-A delta summary.")
     return add_pair_report_args(parser)
 
 
@@ -78,13 +90,19 @@ def plot_pair(
     a_cam_csv: Path,
     offset_nd: float,
     offset_a: float,
+    *,
+    plot_component: str | None = None,
     clip_start_s: float | None = None,
     clip_end_s: float | None = None,
 ) -> None:
     nd_df = pd.read_csv(nd_csv)
     a_df = pd.read_csv(a_csv)
 
-    joint = best_joint_from_reliability(a_csv)
+    camera_space = str(a_df["camera_space"].iloc[0]) if "camera_space" in a_df.columns and not a_df.empty else "image"
+    if plot_component is None:
+        plot_component = "z" if camera_space == "world" else "y"
+
+    joint = best_joint_from_reliability(a_csv, component=plot_component)
     if joint is None:
         print(f"[{tag}] No suitable joint found for plotting.")
         return
@@ -105,10 +123,12 @@ def plot_pair(
         nd_sub = nd_sub.loc[mask_clip]
         t = nd_sub["time_s"].to_numpy()
 
-    mocopi = nd_sub["mocopi_dy"].to_numpy()
-    nd_traj = nd_sub["camera_dy"].to_numpy()
+    mocopi_col = {"x": "mocopi_dx", "y": "mocopi_dy", "z": "mocopi_dz"}[plot_component]
+    camera_col = {"x": "camera_dx", "y": "camera_dy", "z": "camera_dz"}[plot_component]
+    mocopi = nd_sub[mocopi_col].to_numpy()
+    nd_traj = nd_sub[camera_col].to_numpy()
     t_a = a_sub["time_s"].to_numpy()
-    a_cam = a_sub["camera_dy"].to_numpy()
+    a_cam = a_sub[camera_col].to_numpy()
     a_traj = np.interp(t, t_a, a_cam, left=np.nan, right=np.nan)
 
     counts_nd = align_pose_counts(nd_cam_csv, t * 1000.0, offset_nd)
@@ -116,11 +136,11 @@ def plot_pair(
 
     artifacts.plot_dir.mkdir(parents=True, exist_ok=True)
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 5), sharex=True)
-    ax1.plot(t, mocopi, label="Mocopi ΔY", color="#1f77b4", linewidth=1.5)
-    ax1.plot(t, a_traj, label="A (unfiltered) ΔY", color="#2ca02c", linewidth=1.2)
-    ax1.plot(t, nd_traj, label="ND ΔY", color="#d62728", linewidth=1.2)
-    ax1.set_ylabel("Egocentric ΔY (body-scale)")
-    ax1.set_title(f"Tag {tag} - joint {joint}")
+    ax1.plot(t, mocopi, label=f"Mocopi d{plot_component}", color="#1f77b4", linewidth=1.5)
+    ax1.plot(t, a_traj, label=f"A (unfiltered) d{plot_component}", color="#2ca02c", linewidth=1.2)
+    ax1.plot(t, nd_traj, label=f"ND d{plot_component}", color="#d62728", linewidth=1.2)
+    ax1.set_ylabel(f"Egocentric d{plot_component}")
+    ax1.set_title(f"Tag {tag} - joint {joint} ({camera_space})")
     ax1.grid(alpha=0.3)
     ax1.legend(loc="upper right", fontsize=8)
 
@@ -141,7 +161,7 @@ def run_pair_report(args: argparse.Namespace) -> None:
     paths = resolve_project_paths(args.project_root)
     artifact_store = ArtifactStore(paths)
     artifact_store.ensure_standard_dirs()
-    artifacts = artifact_store.pair_report()
+    artifacts = artifact_store.pair_report(args.camera_space)
 
     camera_roles = parse_camera_role_specs(args.camera_role)
     pairs = discover_pairs(paths.root, camera_roles=camera_roles)
@@ -166,33 +186,42 @@ def run_pair_report(args: argparse.Namespace) -> None:
         a_stem = pair.unfiltered_video.stem
         nd_camera_csv = _camera_csv_for_video(pair.nd_video, paths.root)
         a_camera_csv = _camera_csv_for_video(pair.unfiltered_video, paths.root)
+        nd_projection_csv = nd_camera_csv if args.camera_space == "image" else infer_pose_world_csv(nd_camera_csv, paths.root)
+        a_projection_csv = a_camera_csv if args.camera_space == "image" else infer_pose_world_csv(a_camera_csv, paths.root)
 
-        nd_output = artifacts.output_dir / f"mocopi_camera_reliability_{nd_stem}.csv"
-        a_output = artifacts.output_dir / f"mocopi_camera_reliability_{a_stem}.csv"
+        nd_output = artifacts.output_dir / f"mocopi_camera_reliability_{args.camera_space}_{nd_stem}.csv"
+        a_output = artifacts.output_dir / f"mocopi_camera_reliability_{args.camera_space}_{a_stem}.csv"
 
-        if not nd_camera_csv.exists() or not a_camera_csv.exists():
+        if not nd_camera_csv.exists() or not a_camera_csv.exists() or not nd_projection_csv.exists() or not a_projection_csv.exists():
             print(
-                f"[{pair.tag}] Missing camera CSVs; ND: {nd_camera_csv.exists()}, A: {a_camera_csv.exists()}"
+                f"[{pair.tag}] Missing camera CSVs; ND image={nd_camera_csv.exists()} ND {args.camera_space}={nd_projection_csv.exists()} "
+                f"A image={a_camera_csv.exists()} A {args.camera_space}={a_projection_csv.exists()}"
             )
             continue
 
         ensure_reliability_csv(
             pair.motion_source,
-            nd_camera_csv,
+            nd_projection_csv,
             nd_output,
             args.offset_ms,
             args.search_ms,
             args.rate_hz,
+            offset_camera_csv=nd_camera_csv,
+            camera_space=args.camera_space,
+            comparison_components=default_comparison_components(args.camera_space),
             clip_start_s=args.clip_start,
             clip_end_s=args.clip_end,
         )
         ensure_reliability_csv(
             pair.motion_source,
-            a_camera_csv,
+            a_projection_csv,
             a_output,
             args.offset_ms,
             args.search_ms,
             args.rate_hz,
+            offset_camera_csv=a_camera_csv,
+            camera_space=args.camera_space,
+            comparison_components=default_comparison_components(args.camera_space),
             clip_start_s=args.clip_start,
             clip_end_s=args.clip_end,
         )
@@ -225,6 +254,7 @@ def run_pair_report(args: argparse.Namespace) -> None:
                 {
                     "tag": pair.tag,
                     "joint": joint,
+                    "camera_space": args.camera_space,
                     "nd": nd_level,
                     "error_nd": err_nd,
                     "error_a": err_a,
@@ -242,6 +272,7 @@ def run_pair_report(args: argparse.Namespace) -> None:
             a_camera_csv,
             offset_nd or 0.0,
             offset_a or 0.0,
+            plot_component=args.plot_component,
             clip_start_s=args.clip_start,
             clip_end_s=args.clip_end,
         )
@@ -259,7 +290,7 @@ def run_pair_report(args: argparse.Namespace) -> None:
         ax.set_xscale("log", base=2)
         ax.set_xlabel("ND factor (log2)")
         ax.set_ylabel("Error ratio (ND / A)")
-        ax.set_title("ND-induced change in body-scale error (normalized)")
+        ax.set_title(f"ND-induced change in body-scale error ({args.camera_space})")
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
         fig.tight_layout()

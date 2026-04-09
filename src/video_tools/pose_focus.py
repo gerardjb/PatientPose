@@ -13,6 +13,30 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for older mediapipe l
 
 
 @dataclass
+class CropTransform:
+    """Metadata linking a cropped region back to the full frame."""
+
+    left: int
+    top: int
+    width: int
+    height: int
+    frame_width: int
+    frame_height: int
+
+    @property
+    def scale_x(self) -> float:
+        return float(self.width) / max(float(self.frame_width), 1.0)
+
+    @property
+    def scale_y(self) -> float:
+        return float(self.height) / max(float(self.frame_height), 1.0)
+
+    @property
+    def scale(self) -> float:
+        return float(np.sqrt(self.scale_x * self.scale_y))
+
+
+@dataclass
 class PoseFocusHint:
     """Summary of a representative pose observation for ROI seeding."""
 
@@ -24,20 +48,6 @@ class PoseFocusHint:
 
 def _clip(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
     return max(minimum, min(maximum, value))
-
-
-def _expand_bbox(bbox: Tuple[float, float, float, float], amount: float) -> Tuple[float, float, float, float]:
-    left, top, right, bottom = bbox
-    width = right - left
-    height = bottom - top
-    expand_x = width * amount
-    expand_y = height * amount
-    return (
-        _clip(left - expand_x),
-        _clip(top - expand_y),
-        _clip(right + expand_x),
-        _clip(bottom + expand_y),
-    )
 
 
 def bbox_from_landmarks(landmarks: Sequence[NormalizedLandmark], margin: float = 0.05) -> Tuple[float, float, float, float]:
@@ -59,6 +69,7 @@ class PoseFocusTracker:
         max_failures_before_reset: int = 10,
         expansion_rate: float = 0.25,
         smooth_factor: float = 0.8,
+        min_bbox_fraction: float = 0.2,
     ) -> None:
         self._hint = hint
         self._current_bbox = list(hint.bbox)
@@ -66,6 +77,7 @@ class PoseFocusTracker:
         self._max_failures = max_failures_before_reset
         self._expansion_rate = expansion_rate
         self._smooth_factor = smooth_factor
+        self._min_bbox_fraction = min_bbox_fraction
 
     def region_rect(self) -> Optional[Rect]:
         if self._current_bbox is None:
@@ -73,18 +85,32 @@ class PoseFocusTracker:
         left, top, right, bottom = self._current_bbox
         return Rect(left=float(left), top=float(top), right=float(right), bottom=float(bottom))
 
+    def _clamp_bbox(self, bbox: tuple[float, float, float, float]) -> list[float]:
+        left, top, right, bottom = bbox
+        width = max(right - left, self._min_bbox_fraction)
+        height = max(bottom - top, self._min_bbox_fraction)
+        cx = 0.5 * (left + right)
+        cy = 0.5 * (top + bottom)
+        half_w = 0.5 * width
+        half_h = 0.5 * height
+        left = _clip(cx - half_w)
+        right = _clip(cx + half_w)
+        top = _clip(cy - half_h)
+        bottom = _clip(cy + half_h)
+        return [left, top, right, bottom]
+
     def register_success(self, landmarks: Sequence[NormalizedLandmark]) -> None:
         self._failure_count = 0
         new_bbox = bbox_from_landmarks(landmarks)
         if self._current_bbox is None:
-            self._current_bbox = list(new_bbox)
+            self._current_bbox = self._clamp_bbox(new_bbox)
             return
         sm = self._smooth_factor
         left = sm * self._current_bbox[0] + (1 - sm) * new_bbox[0]
         top = sm * self._current_bbox[1] + (1 - sm) * new_bbox[1]
         right = sm * self._current_bbox[2] + (1 - sm) * new_bbox[2]
         bottom = sm * self._current_bbox[3] + (1 - sm) * new_bbox[3]
-        self._current_bbox = [_clip(left), _clip(top), _clip(right), _clip(bottom)]
+        self._current_bbox = self._clamp_bbox((left, top, right, bottom))
 
     def register_failure(self) -> None:
         self._failure_count += 1
@@ -98,12 +124,14 @@ class PoseFocusTracker:
         height = max(1e-3, bottom - top)
         expand_x = width * self._expansion_rate
         expand_y = height * self._expansion_rate
-        self._current_bbox = [
-            _clip(left - expand_x),
-            _clip(top - expand_y),
-            _clip(right + expand_x),
-            _clip(bottom + expand_y),
-        ]
+        self._current_bbox = self._clamp_bbox(
+            (
+                left - expand_x,
+                top - expand_y,
+                right + expand_x,
+                bottom + expand_y,
+            )
+        )
 
     def current_bbox(self) -> Optional[Tuple[float, float, float, float]]:
         if self._current_bbox is None:
@@ -137,6 +165,8 @@ def crop_frame_from_bbox(
 def remap_landmarks_from_crop(
     landmarks: Sequence[NormalizedLandmark],
     transform: CropTransform,
+    *,
+    rescale_z: bool = True,
 ) -> Sequence[NormalizedLandmark]:
     if transform.width <= 0 or transform.height <= 0:
         return landmarks
@@ -145,6 +175,8 @@ def remap_landmarks_from_crop(
         full_y = (transform.top + landmark.y * transform.height) / transform.frame_height
         landmark.x = _clip(full_x)
         landmark.y = _clip(full_y)
+        if rescale_z and hasattr(landmark, "z"):
+            landmark.z = float(landmark.z) * transform.scale
     return landmarks
 
 
@@ -156,16 +188,3 @@ __all__ = [
     "crop_frame_from_bbox",
     "remap_landmarks_from_crop",
 ]
-
-
-__all__ = ["PoseFocusHint", "PoseFocusTracker", "bbox_from_landmarks"]
-@dataclass
-class CropTransform:
-    """Metadata linking a cropped region back to the full frame."""
-
-    left: int
-    top: int
-    width: int
-    height: int
-    frame_width: int
-    frame_height: int

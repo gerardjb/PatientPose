@@ -24,6 +24,7 @@ DEFAULT_VERTICAL_AXIS_PAIRS = (
 
 @dataclass(frozen=True)
 class CameraProjectionConfig:
+    space: str = "image"
     visibility_threshold: float | None = 0.4
     smooth_window: int = 7
     rotate_to_body_frame: bool = False
@@ -35,6 +36,7 @@ class CameraProjectionConfig:
 
 @dataclass(frozen=True)
 class CameraProjectionResult:
+    space: str
     frame_indices: np.ndarray
     timestamps_ms: np.ndarray
     positions: dict[str, np.ndarray]
@@ -129,9 +131,15 @@ def compute_camera_projection(
     if config is None:
         config = CameraProjectionConfig()
 
+    if config.space not in {"image", "world"}:
+        raise ValueError(f"Unsupported camera projection space: {config.space!r}")
+
     pose_df = df[df["source"] == "pose"].copy()
+    if "coordinate_space" in pose_df.columns:
+        default_space = config.space
+        pose_df = pose_df[pose_df["coordinate_space"].fillna(default_space) == config.space].copy()
     if pose_df.empty:
-        raise NoCameraPoseDataError("No pose landmarks found in camera CSV")
+        raise NoCameraPoseDataError(f"No {config.space}-space pose landmarks found in camera CSV")
 
     has_visibility = "visibility" in pose_df.columns
     frame_indices = np.array(sorted(pose_df["frame"].unique()), dtype=int)
@@ -157,26 +165,31 @@ def compute_camera_projection(
 
         timestamps_ms.append(float(sub["timestamp_ms"].iloc[0]))
 
-        by_name_xy: dict[str, tuple[float, float]] = {}
-        by_name_z: dict[str, float] = {}
+        by_name_xyz: dict[str, np.ndarray] = {}
         for _, row in sub.iterrows():
             visibility = float(row["visibility"]) if has_visibility else 1.0
             if config.visibility_threshold is not None:
                 if np.isnan(visibility) or visibility < config.visibility_threshold:
                     continue
             landmark_name = str(row["landmark_name"])
-            by_name_xy[landmark_name] = (float(row["x"]), float(row["y"]))
-            by_name_z[landmark_name] = float(row["z"]) if "z" in row.index else np.nan
+            by_name_xyz[landmark_name] = np.array(
+                [
+                    float(row["x"]),
+                    float(row["y"]),
+                    float(row["z"]) if "z" in row.index else np.nan,
+                ],
+                dtype=float,
+            )
 
-        origin_candidates = [by_name_xy[name] for name in config.origin_landmarks if name in by_name_xy]
+        origin_candidates = [by_name_xyz[name][:2] for name in config.origin_landmarks if name in by_name_xyz]
         if not origin_candidates:
-            origin_candidates = list(by_name_xy.values())
+            origin_candidates = [coords[:2] for coords in by_name_xyz.values()]
         if origin_candidates:
             origin_xy[row_idx] = _mean_points(origin_candidates)
 
-        origin_depth_candidates = [by_name_z[name] for name in config.origin_landmarks if name in by_name_z]
+        origin_depth_candidates = [by_name_xyz[name][2] for name in config.origin_landmarks if name in by_name_xyz]
         if not origin_depth_candidates:
-            origin_depth_candidates = list(by_name_z.values())
+            origin_depth_candidates = [coords[2] for coords in by_name_xyz.values()]
         finite_depths = np.asarray(origin_depth_candidates, dtype=float)
         finite_depths = finite_depths[np.isfinite(finite_depths)]
         if finite_depths.size:
@@ -184,33 +197,37 @@ def compute_camera_projection(
 
         scale_values = []
         for left_name, right_name in config.scale_pairs:
-            if left_name in by_name_xy and right_name in by_name_xy:
-                left_pt = np.asarray(by_name_xy[left_name], dtype=float)
-                right_pt = np.asarray(by_name_xy[right_name], dtype=float)
+            if left_name in by_name_xyz and right_name in by_name_xyz:
+                if config.space == "world":
+                    left_pt = by_name_xyz[left_name]
+                    right_pt = by_name_xyz[right_name]
+                else:
+                    left_pt = by_name_xyz[left_name][:2]
+                    right_pt = by_name_xyz[right_name][:2]
                 distance = float(np.linalg.norm(right_pt - left_pt))
                 if np.isfinite(distance) and distance > 1e-6:
                     scale_values.append(distance)
         if scale_values:
             scale[row_idx] = float(np.mean(scale_values))
-        elif np.all(np.isfinite(origin_xy[row_idx])) and by_name_xy:
-            offsets = np.asarray(list(by_name_xy.values()), dtype=float) - origin_xy[row_idx]
+        elif np.all(np.isfinite(origin_xy[row_idx])) and by_name_xyz:
+            offsets = np.asarray([coords[:2] for coords in by_name_xyz.values()], dtype=float) - origin_xy[row_idx]
             distances = np.linalg.norm(offsets, axis=1)
             finite = distances[np.isfinite(distances)]
             if finite.size:
                 scale[row_idx] = float(np.mean(finite))
 
-        if config.lateral_axis_pair[0] in by_name_xy and config.lateral_axis_pair[1] in by_name_xy:
-            left_pt = np.asarray(by_name_xy[config.lateral_axis_pair[0]], dtype=float)
-            right_pt = np.asarray(by_name_xy[config.lateral_axis_pair[1]], dtype=float)
+        if config.lateral_axis_pair[0] in by_name_xyz and config.lateral_axis_pair[1] in by_name_xyz:
+            left_pt = np.asarray(by_name_xyz[config.lateral_axis_pair[0]][:2], dtype=float)
+            right_pt = np.asarray(by_name_xyz[config.lateral_axis_pair[1]][:2], dtype=float)
             body_x_axis[row_idx] = right_pt - left_pt
         else:
             body_x_axis[row_idx] = np.array([1.0, 0.0], dtype=float)
 
         vertical_vectors = []
         for hip_name, shoulder_name in config.vertical_axis_pairs:
-            if hip_name in by_name_xy and shoulder_name in by_name_xy:
-                hip_pt = np.asarray(by_name_xy[hip_name], dtype=float)
-                shoulder_pt = np.asarray(by_name_xy[shoulder_name], dtype=float)
+            if hip_name in by_name_xyz and shoulder_name in by_name_xyz:
+                hip_pt = np.asarray(by_name_xyz[hip_name][:2], dtype=float)
+                shoulder_pt = np.asarray(by_name_xyz[shoulder_name][:2], dtype=float)
                 vertical_vectors.append(shoulder_pt - hip_pt)
         if vertical_vectors:
             body_y_axis[row_idx] = np.mean(np.stack(vertical_vectors, axis=0), axis=0)
@@ -218,10 +235,9 @@ def compute_camera_projection(
             body_y_axis[row_idx] = np.array([0.0, -1.0], dtype=float)
 
         for landmark_name in landmark_names:
-            if landmark_name in by_name_xy:
-                image_points[landmark_name][row_idx] = by_name_xy[landmark_name]
-            if landmark_name in by_name_z:
-                image_depths[landmark_name][row_idx] = by_name_z[landmark_name]
+            if landmark_name in by_name_xyz:
+                image_points[landmark_name][row_idx] = by_name_xyz[landmark_name][:2]
+                image_depths[landmark_name][row_idx] = by_name_xyz[landmark_name][2]
 
     timestamps_arr = np.asarray(timestamps_ms, dtype=float)
     if timestamps_arr.size != frame_indices.size:
@@ -248,7 +264,10 @@ def compute_camera_projection(
             projected[valid, 1] = np.einsum("ij,ij->i", rel[valid], body_y_axis[valid]) / scale[valid]
         else:
             projected[valid, 0] = rel[valid, 0] / scale[valid]
-            projected[valid, 1] = -rel[valid, 1] / scale[valid]
+            if config.space == "image":
+                projected[valid, 1] = -rel[valid, 1] / scale[valid]
+            else:
+                projected[valid, 1] = rel[valid, 1] / scale[valid]
         depths = image_depths[landmark_name]
         depth_valid = valid & np.isfinite(depths) & np.isfinite(origin_z)
         projected[depth_valid, 2] = (depths[depth_valid] - origin_z[depth_valid]) / scale[depth_valid]
@@ -256,6 +275,7 @@ def compute_camera_projection(
         valid_mask[landmark_name] = valid
 
     return CameraProjectionResult(
+        space=config.space,
         frame_indices=frame_indices,
         timestamps_ms=timestamps_arr,
         positions=positions,

@@ -13,6 +13,7 @@ from patientpose.diagnostics import (
     prepare_pose_landmarks_by_frame,
     render_projection_overlay_video,
 )
+from patientpose.landmarks import load_landmark_views
 from patientpose.pipeline.rendering import (
     _resolve_camera_panel_video,
     _resolve_cli_path,
@@ -59,6 +60,18 @@ def add_egocentric_common_args(parser: argparse.ArgumentParser) -> argparse.Argu
         help="Pose landmarks to project and visualize.",
     )
     parser.add_argument(
+        "--space",
+        choices=("image", "world"),
+        default="world",
+        help="Which pose representation to analyze.",
+    )
+    parser.add_argument(
+        "--world_csv",
+        type=Path,
+        default=None,
+        help="Optional explicit path to the pose-world CSV. Defaults to the paired preprocess artifact.",
+    )
+    parser.add_argument(
         "--components",
         nargs="+",
         default=None,
@@ -86,7 +99,7 @@ def add_egocentric_common_args(parser: argparse.ArgumentParser) -> argparse.Argu
 
 def add_egocentric_plot_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     add_egocentric_common_args(parser)
-    parser.set_defaults(components=["x", "y", "z"])
+    parser.set_defaults(components=["y", "z"])
     parser.add_argument(
         "--output",
         type=Path,
@@ -98,7 +111,7 @@ def add_egocentric_plot_args(parser: argparse.ArgumentParser) -> argparse.Argume
 
 def add_egocentric_video_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     add_egocentric_common_args(parser)
-    parser.set_defaults(components=["x", "y"])
+    parser.set_defaults(components=["y", "z"])
     parser.add_argument(
         "--video",
         type=Path,
@@ -185,12 +198,22 @@ def run_egocentric_plot(args: argparse.Namespace) -> None:
         camera_side=args.camera_side,
         camera_role_specs=args.camera_role,
     )
-    df = pd.read_csv(camera_csv_path)
-    pose_landmarks_by_frame = prepare_pose_landmarks_by_frame(df, visibility_threshold=None)
+    landmark_views = load_landmark_views(
+        camera_csv_path,
+        project_root=paths.root,
+        world_csv=_resolve_cli_path(args.world_csv, paths.root) if args.world_csv is not None else None,
+        require_world=args.space == "world",
+    )
+    image_df = landmark_views.image_df
+    pose_landmarks_by_frame = prepare_pose_landmarks_by_frame(image_df, visibility_threshold=None)
+    projection_df = landmark_views.world_df if args.space == "world" else image_df
+    if projection_df is None:
+        raise SystemExit(f"No {args.space}-space landmark data available for {camera_csv_path}.")
     projection = compute_camera_projection(
-        df,
+        projection_df,
         args.landmarks,
         CameraProjectionConfig(
+            space=args.space,
             visibility_threshold=args.visibility_threshold,
             smooth_window=args.smooth_window,
             rotate_to_body_frame=args.body_frame,
@@ -198,13 +221,13 @@ def run_egocentric_plot(args: argparse.Namespace) -> None:
     )
 
     frame_mode = _projection_frame_label(args.body_frame)
-    default_output = artifact_store.egocentric_diagnostics(label, frame_mode).components_plot
+    default_output = artifact_store.egocentric_diagnostics(label, frame_mode, args.space).components_plot
     output_path = _resolve_cli_path(args.output, paths.root) if args.output is not None else default_output
     plot_projection_components(
         projection,
         args.landmarks,
         output_path,
-        title=f"Egocentric components: {label} ({frame_mode})",
+        title=f"Egocentric components: {label} ({args.space}, {frame_mode})",
         components=args.components,
     )
     print(f"Saved egocentric components plot to {output_path}")
@@ -238,12 +261,22 @@ def run_egocentric_video(args: argparse.Namespace) -> None:
         args.orientation_max_scan,
     )
 
-    df = pd.read_csv(camera_csv_path)
-    pose_landmarks_by_frame = prepare_pose_landmarks_by_frame(df, visibility_threshold=None)
+    landmark_views = load_landmark_views(
+        camera_csv_path,
+        project_root=paths.root,
+        world_csv=_resolve_cli_path(args.world_csv, paths.root) if args.world_csv is not None else None,
+        require_world=args.space == "world",
+    )
+    image_df = landmark_views.image_df
+    projection_df = landmark_views.world_df if args.space == "world" else image_df
+    if projection_df is None:
+        raise SystemExit(f"No {args.space}-space landmark data available for {camera_csv_path}.")
+    pose_landmarks_by_frame = prepare_pose_landmarks_by_frame(image_df, visibility_threshold=None)
     projection = compute_camera_projection(
-        df,
+        projection_df,
         args.landmarks,
         CameraProjectionConfig(
+            space=args.space,
             visibility_threshold=args.visibility_threshold,
             smooth_window=args.smooth_window,
             rotate_to_body_frame=args.body_frame,
@@ -251,7 +284,7 @@ def run_egocentric_video(args: argparse.Namespace) -> None:
     )
 
     frame_mode = _projection_frame_label(args.body_frame)
-    default_output = artifact_store.egocentric_diagnostics(label, frame_mode).overlay_video
+    default_output = artifact_store.egocentric_diagnostics(label, frame_mode, args.space).overlay_video
     output_path = _resolve_cli_path(args.output, paths.root) if args.output is not None else default_output
     title = f"Egocentric debug: {label}"
     render_projection_overlay_video(
@@ -263,7 +296,7 @@ def run_egocentric_video(args: argparse.Namespace) -> None:
         rotation_code=rotation_code,
         max_frames=args.max_frames,
         title=title,
-        projection_frame_label=f"{frame_mode} | {panel_source} | {rotation_source}",
+        projection_frame_label=f"{args.space} | {frame_mode} | {panel_source} | {rotation_source}",
         trace_components=args.components,
     )
     print(f"Saved egocentric overlay video to {output_path}")
