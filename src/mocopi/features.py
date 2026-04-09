@@ -187,7 +187,7 @@ def compute_camera_egocentric_positions(
     df: pd.DataFrame,
     landmark_names: Sequence[str],
     com_landmarks: Sequence[str] | None = None,
-    visibility_threshold: float | None = 0.8,
+    visibility_threshold: float | None = 0.4,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """
     Compute per-frame egocentric 2D positions for selected camera landmarks.
@@ -198,7 +198,7 @@ def compute_camera_egocentric_positions(
     not dominate the trajectories. The vertical component is flipped so that
     increasing values correspond to motion "upward" in the image, to match
     the Mocopi convention where +Y is roughly up. Landmarks with visibility
-    below `visibility_threshold` (default 0.8) are treated as missing; pass
+    below `visibility_threshold` (default 0.4) are treated as missing; pass
     None to disable thresholding.
     """
     pose_df = df[df["source"] == "pose"].copy()

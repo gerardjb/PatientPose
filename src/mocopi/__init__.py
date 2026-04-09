@@ -15,6 +15,11 @@ from .features import (
     extract_mocopi_feature,
     extract_camera_feature,
 )
+from .camera_projection import (
+    CameraProjectionConfig,
+    CameraProjectionResult,
+    compute_camera_projection,
+)
 from .sync import estimate_time_offset, clean_feature_samples, estimate_camera_to_mocopi_offset
 from .nd_pilot import (
     CameraRecording,
@@ -61,8 +66,11 @@ __all__ = [
     "mocopi_to_frame_table",
     "MocopiFeatureConfig",
     "CameraFeatureConfig",
+    "CameraProjectionConfig",
+    "CameraProjectionResult",
     "extract_mocopi_feature",
     "extract_camera_feature",
+    "compute_camera_projection",
     "estimate_time_offset",
     "clean_feature_samples",
     "estimate_camera_to_mocopi_offset",

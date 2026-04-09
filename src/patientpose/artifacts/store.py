@@ -49,6 +49,13 @@ class FourpanelTripletArtifacts:
     output_plot: Path
 
 
+@dataclass(frozen=True)
+class EgocentricDiagnosticsArtifacts:
+    output_dir: Path
+    components_plot: Path
+    overlay_video: Path
+
+
 class ArtifactStore:
     def __init__(self, paths: ProjectPaths) -> None:
         self.paths = paths
@@ -111,4 +118,12 @@ class ArtifactStore:
         return FourpanelTripletArtifacts(
             output_plot=self.paths.output_plots
             / f"fourpanel_{tag}_offset_{offset_ms:.1f}ms_vis_{visibility_threshold:.2f}.pdf",
+        )
+
+    def egocentric_diagnostics(self, stem: str, frame_mode: str) -> EgocentricDiagnosticsArtifacts:
+        output_dir = self.paths.results / "Diagnostics" / "egocentric"
+        return EgocentricDiagnosticsArtifacts(
+            output_dir=output_dir,
+            components_plot=output_dir / f"{stem}_{frame_mode}_components.pdf",
+            overlay_video=output_dir / f"{stem}_{frame_mode}_overlay.avi",
         )

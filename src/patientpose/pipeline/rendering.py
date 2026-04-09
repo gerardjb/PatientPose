@@ -243,7 +243,7 @@ def add_fourpanel_triplet_args(parser: argparse.ArgumentParser) -> argparse.Argu
     parser.add_argument(
         "--visibility-threshold",
         type=float,
-        default=0.8,
+        default=0.4,
         help="Visibility threshold for camera landmarks.",
     )
     parser.add_argument(

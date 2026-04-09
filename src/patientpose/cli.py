@@ -8,6 +8,12 @@ from patientpose.pipeline.analyze import (
     run_reliability_batch,
     run_reliability_export,
 )
+from patientpose.pipeline.diagnostics import (
+    add_egocentric_plot_args,
+    add_egocentric_video_args,
+    run_egocentric_plot,
+    run_egocentric_video,
+)
 from patientpose.pipeline.preprocess import (
     add_preprocess_quality_video_args,
     add_preprocess_video_args,
@@ -111,6 +117,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_fourpanel_triplet_args(render_fourpanel_parser)
     render_fourpanel_parser.set_defaults(handler=run_fourpanel_triplet)
+
+    diagnose_parser = subparsers.add_parser(
+        "diagnose",
+        help="Run troubleshooting and diagnostics workflows.",
+    )
+    diagnose_subparsers = diagnose_parser.add_subparsers(dest="diagnose_command", required=True)
+
+    diagnose_plot_parser = diagnose_subparsers.add_parser(
+        "egocentric-plot",
+        help="Plot dx/dy component traces and projection state for a camera CSV.",
+    )
+    add_egocentric_plot_args(diagnose_plot_parser)
+    diagnose_plot_parser.set_defaults(handler=run_egocentric_plot)
+
+    diagnose_video_parser = diagnose_subparsers.add_parser(
+        "egocentric-video",
+        help="Render an overlay video showing body-frame axes and projected dx/dy trails.",
+    )
+    add_egocentric_video_args(diagnose_video_parser)
+    diagnose_video_parser.set_defaults(handler=run_egocentric_video)
 
     return parser
 
