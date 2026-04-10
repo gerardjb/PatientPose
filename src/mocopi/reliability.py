@@ -152,6 +152,7 @@ def ensure_reliability_csv(
     rate_hz: float,
     *,
     offset_camera_csv: Path | None = None,
+    offset_world_csv: Path | None = None,
     camera_space: str = "world",
     comparison_components: tuple[str, str] | None = None,
     visibility_threshold: float | None = 0.4,
@@ -167,6 +168,7 @@ def ensure_reliability_csv(
     seq = load_mocopi_recording(motion_source)
     cam_df = pd.read_csv(camera_csv)
     offset_cam_df = pd.read_csv(offset_camera_csv) if offset_camera_csv is not None else cam_df
+    offset_world_df = pd.read_csv(offset_world_csv) if offset_world_csv is not None else (cam_df if camera_space == "world" else None)
     try:
         offset_used = estimate_camera_to_mocopi_offset(
             seq,
@@ -176,6 +178,7 @@ def ensure_reliability_csv(
             offset_ms,
             clip_start_s=clip_start_s,
             clip_end_s=clip_end_s,
+            world_df=offset_world_df,
         )
         df_out = export_reliability_errors(
             seq,
@@ -295,6 +298,7 @@ def get_aligned_traces(
     clip_start_s: float | None,
     clip_end_s: float | None,
     *,
+    world_camera_csv: Path | None = None,
     camera_space: str = "world",
     component: str | None = None,
     visibility_threshold: float | None = 0.4,
@@ -308,6 +312,7 @@ def get_aligned_traces(
 
     seq = load_mocopi_recording(motion_source)
     cam_df = pd.read_csv(camera_csv)
+    world_df = pd.read_csv(world_camera_csv) if world_camera_csv is not None else (cam_df if camera_space == "world" else None)
 
     needed_joints = list(dict.fromkeys([*joints, *SCALE_REF_JOINTS]))
     t_m_ms, mocopi_pos = compute_egocentric_positions(seq, needed_joints)
@@ -338,6 +343,7 @@ def get_aligned_traces(
             None,
             clip_start_s=clip_start_s,
             clip_end_s=clip_end_s,
+            world_df=world_df,
         )
     else:
         offset_used = offset_ms

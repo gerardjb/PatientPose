@@ -75,7 +75,7 @@ def add_reliability_export_args(parser: argparse.ArgumentParser) -> argparse.Arg
         "--offset_ms",
         type=float,
         default=None,
-        help="Optional camera-to-mocopi offset in ms. If omitted, estimated from r_hand/RIGHT_WRIST.",
+        help="Optional camera-to-mocopi offset in ms. If omitted, estimated from the best scored sync candidate.",
     )
     parser.add_argument(
         "--search_ms",
@@ -181,6 +181,7 @@ def compute_or_use_offset(
     search_ms: float,
     rate_hz: float,
     offset_ms: float | None,
+    world_df: pd.DataFrame | None = None,
     clip_start_s: float | None = None,
     clip_end_s: float | None = None,
 ) -> float:
@@ -192,6 +193,7 @@ def compute_or_use_offset(
         offset_ms,
         clip_start_s=clip_start_s,
         clip_end_s=clip_end_s,
+        world_df=world_df,
     )
 
 
@@ -223,6 +225,7 @@ def run_reliability_export(args: argparse.Namespace) -> None:
             args.search_ms,
             args.rate_hz,
             args.offset_ms,
+            projection_df if args.camera_space == "world" else None,
             clip_start_s=args.clip_start,
             clip_end_s=args.clip_end,
         )
@@ -290,6 +293,7 @@ def _run_reliability_for_pair(
         search_ms,
         rate_hz,
         offset_camera_csv=camera_csv,
+        offset_world_csv=projection_camera_csv if camera_space == "world" else None,
         camera_space=camera_space,
         comparison_components=default_comparison_components(camera_space),
     )

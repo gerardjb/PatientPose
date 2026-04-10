@@ -14,8 +14,10 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 
 from mocopi import (
-    estimate_camera_to_camera_offset,
-    estimate_camera_to_mocopi_offset,
+    CameraDisplayFeatureConfig,
+    build_camera_display_traces,
+    select_camera_to_camera_sync,
+    select_camera_to_mocopi_sync,
     load_mocopi_recording,
     nd_factor_from_stem,
     visibility_percent,
@@ -260,6 +262,18 @@ def add_fourpanel_triplet_args(parser: argparse.ArgumentParser) -> argparse.Argu
         choices=("x", "y", "z"),
         default=None,
         help="Projected component to plot. Defaults to z for world and y for image.",
+    )
+    parser.add_argument(
+        "--camera-display-feature",
+        choices=("auto", "raw", "lower-limb-composite"),
+        default="auto",
+        help="Which derived camera trace to display. This does not affect sync estimation.",
+    )
+    parser.add_argument(
+        "--camera-display-smooth-window",
+        type=int,
+        default=7,
+        help="Smoothing window (frames) applied to the plotted camera display traces.",
     )
     parser.add_argument(
         "--offset-ms",
@@ -561,32 +575,45 @@ def _resolve_fourpanel_offsets(
     *,
     nd_image_df: pd.DataFrame,
     a_image_df: pd.DataFrame,
+    nd_world_df: pd.DataFrame | None,
+    a_world_df: pd.DataFrame | None,
     offset_ms: float | None,
     search_ms: float,
     rate_hz: float,
-) -> tuple[float, float, str]:
+) -> tuple[float, float, str, object, object]:
     if offset_ms is not None:
         fixed = float(offset_ms)
-        return fixed, fixed, f"offset_fixed_{fixed:.1f}ms"
+        fixed_eval = select_camera_to_mocopi_sync(
+            seq,
+            nd_image_df,
+            search_ms,
+            rate_hz,
+            offset_ms=fixed,
+        )
+        return fixed, fixed, f"offset_fixed_{fixed:.1f}ms", fixed_eval, fixed_eval
 
-    nd_offset_ms = estimate_camera_to_mocopi_offset(
+    nd_eval = select_camera_to_mocopi_sync(
         seq,
         nd_image_df,
         search_ms,
         rate_hz,
-        None,
+        world_df=nd_world_df,
     )
-    a_offset_ms = estimate_camera_to_mocopi_offset(
+    a_eval = select_camera_to_mocopi_sync(
         seq,
         a_image_df,
         search_ms,
         rate_hz,
-        None,
+        world_df=a_world_df,
     )
+    nd_offset_ms = nd_eval.offset_ms
+    a_offset_ms = a_eval.offset_ms
     return (
         float(nd_offset_ms),
         float(a_offset_ms),
         f"offset_auto_ND{nd_offset_ms:.1f}ms_A{a_offset_ms:.1f}ms",
+        nd_eval,
+        a_eval,
     )
 
 
@@ -594,15 +621,19 @@ def _estimate_direct_camera_offset(
     *,
     reference_df: pd.DataFrame,
     moving_df: pd.DataFrame,
+    reference_world_df: pd.DataFrame | None,
+    moving_world_df: pd.DataFrame | None,
     search_ms: float,
     rate_hz: float,
-) -> float | None:
+) -> object | None:
     try:
-        return estimate_camera_to_camera_offset(
+        return select_camera_to_camera_sync(
             reference_df,
             moving_df,
             search_ms=search_ms,
             rate_hz=rate_hz,
+            ref_world_df=reference_world_df,
+            moving_world_df=moving_world_df,
         )
     except (NoCameraPoseDataError, RuntimeError, ValueError):
         return None
@@ -868,19 +899,26 @@ def run_side_by_side(args: argparse.Namespace) -> None:
 
     seq = load_mocopi_recording(motion_source)
     cam_df = pd.read_csv(camera_csv_path)
+    world_camera_csv = infer_pose_world_csv(camera_csv_path, paths.root)
+    world_df = pd.read_csv(world_camera_csv) if world_camera_csv.exists() else None
 
     try:
-        offset_ms = estimate_camera_to_mocopi_offset(
+        offset_eval = select_camera_to_mocopi_sync(
             seq,
             cam_df,
             search_ms=args.search_ms,
             rate_hz=args.rate_hz,
             offset_ms=args.offset_ms,
+            world_df=world_df,
         )
     except NoCameraPoseDataError as exc:
         raise SystemExit(
             f"Camera CSV has no usable pose landmarks, so offset estimation cannot run: {camera_csv_path}"
         ) from exc
+    except RuntimeError as exc:
+        raise SystemExit(f"Could not estimate side-by-side offset: {exc}") from exc
+
+    offset_ms = offset_eval.offset_ms
 
     camera_by_frame = prepare_camera_landmarks(cam_df)
     t_m_ms, mocopi_positions = prepare_mocopi_positions(seq)
@@ -894,6 +932,12 @@ def run_side_by_side(args: argparse.Namespace) -> None:
     )
     print(f"Video rotation: {_rotation_label(video_rotation_code)} ({rotation_source})")
     print(f"Mocopi view:    {args.mocopi_view}")
+    if np.isfinite(offset_eval.final_score):
+        print(
+            f"Sync candidate: {offset_eval.candidate_name} "
+            f"({offset_eval.camera_space} d{offset_eval.component}, "
+            f"corr={offset_eval.signed_correlation:.3f}, score={offset_eval.final_score:.3f})"
+        )
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -972,7 +1016,7 @@ def run_side_by_side(args: argparse.Namespace) -> None:
             frame_idx=frame_idx,
             camera_time_ms=t_cam_ms,
             mocopi_time_ms=t_mocopi_ms,
-            offset_ms=offset_ms,
+            offset_text=f"{offset_eval.candidate_name} | offset {offset_ms:+0.0f} ms",
         )
         out.write(combined)
 
@@ -1004,9 +1048,15 @@ def run_triplet_video(args: argparse.Namespace) -> None:
         seq = load_mocopi_recording(pair.motion_source)
         nd_df = pd.read_csv(nd_camera_csv)
         a_df = pd.read_csv(a_camera_csv)
-        direct_a_to_nd_offset_ms = _estimate_direct_camera_offset(
+        nd_world_csv = infer_pose_world_csv(nd_camera_csv, paths.root)
+        a_world_csv = infer_pose_world_csv(a_camera_csv, paths.root)
+        nd_world_df = pd.read_csv(nd_world_csv) if nd_world_csv.exists() else None
+        a_world_df = pd.read_csv(a_world_csv) if a_world_csv.exists() else None
+        direct_a_to_nd_eval = _estimate_direct_camera_offset(
             reference_df=nd_df,
             moving_df=a_df,
+            reference_world_df=nd_world_df,
+            moving_world_df=a_world_df,
             search_ms=args.search_ms,
             rate_hz=args.rate_hz,
         )
@@ -1014,31 +1064,54 @@ def run_triplet_video(args: argparse.Namespace) -> None:
         if args.offset_ms is not None:
             nd_offset_ms = float(args.offset_ms)
             a_offset_ms = float(args.offset_ms)
+            nd_sync_eval = select_camera_to_mocopi_sync(
+                seq,
+                nd_df,
+                args.search_ms,
+                args.rate_hz,
+                offset_ms=nd_offset_ms,
+            )
+            a_sync_eval = select_camera_to_mocopi_sync(
+                seq,
+                a_df,
+                args.search_ms,
+                args.rate_hz,
+                offset_ms=a_offset_ms,
+            )
         else:
             try:
-                nd_offset_ms = estimate_camera_to_mocopi_offset(
+                nd_sync_eval = select_camera_to_mocopi_sync(
                     seq,
                     nd_df,
-                    args.search_ms,
-                    args.rate_hz,
-                    None,
+                    search_ms=args.search_ms,
+                    rate_hz=args.rate_hz,
+                    world_df=nd_world_df,
                 )
-                a_offset_ms = estimate_camera_to_mocopi_offset(
+                a_sync_eval = select_camera_to_mocopi_sync(
                     seq,
                     a_df,
-                    args.search_ms,
-                    args.rate_hz,
-                    None,
+                    search_ms=args.search_ms,
+                    rate_hz=args.rate_hz,
+                    world_df=a_world_df,
                 )
             except NoCameraPoseDataError:
                 print(f"[{pair.tag}] A or ND camera CSV has no usable pose landmarks; skipping triplet video.")
                 continue
-            if direct_a_to_nd_offset_ms is None:
-                print(f"[{pair.tag}] Estimated offsets ND={nd_offset_ms:.1f} ms, A={a_offset_ms:.1f} ms")
+            except RuntimeError as exc:
+                print(f"[{pair.tag}] Could not estimate triplet offsets: {exc}")
+                continue
+            nd_offset_ms = nd_sync_eval.offset_ms
+            a_offset_ms = a_sync_eval.offset_ms
+            if direct_a_to_nd_eval is None:
+                print(
+                    f"[{pair.tag}] Estimated offsets ND={nd_offset_ms:.1f} ms ({nd_sync_eval.candidate_name}), "
+                    f"A={a_offset_ms:.1f} ms ({a_sync_eval.candidate_name})"
+                )
             else:
                 print(
-                    f"[{pair.tag}] Estimated offsets ND={nd_offset_ms:.1f} ms, A={a_offset_ms:.1f} ms, "
-                    f"A->ND={direct_a_to_nd_offset_ms:.1f} ms"
+                    f"[{pair.tag}] Estimated offsets ND={nd_offset_ms:.1f} ms ({nd_sync_eval.candidate_name}), "
+                    f"A={a_offset_ms:.1f} ms ({a_sync_eval.candidate_name}), "
+                    f"A->ND={direct_a_to_nd_eval.offset_ms:.1f} ms ({direct_a_to_nd_eval.candidate_name})"
                 )
 
         t_m_ms, mocopi_positions = prepare_mocopi_positions(seq)
@@ -1148,12 +1221,16 @@ def run_triplet_video(args: argparse.Namespace) -> None:
         draw_overlay_nd = not _is_processed_video(nd_video_path)
         last_a_idx: int | None = None
         last_nd_idx: int | None = None
-        if direct_a_to_nd_offset_ms is None:
-            offset_text = f"offset ND {nd_offset_ms:+0.0f} ms | A {a_offset_ms:+0.0f} ms"
+        if direct_a_to_nd_eval is None:
+            offset_text = (
+                f"{nd_sync_eval.candidate_name} ND {nd_offset_ms:+0.0f} ms | "
+                f"{a_sync_eval.candidate_name} A {a_offset_ms:+0.0f} ms"
+            )
         else:
             offset_text = (
-                f"offset ND {nd_offset_ms:+0.0f} ms | A {a_offset_ms:+0.0f} ms | "
-                f"A->ND {direct_a_to_nd_offset_ms:+0.0f} ms"
+                f"{nd_sync_eval.candidate_name} ND {nd_offset_ms:+0.0f} ms | "
+                f"{a_sync_eval.candidate_name} A {a_offset_ms:+0.0f} ms | "
+                f"{direct_a_to_nd_eval.candidate_name} A->ND {direct_a_to_nd_eval.offset_ms:+0.0f} ms"
             )
 
         for output_idx, nd_frame_idx in enumerate(render_nd_indices):
@@ -1276,17 +1353,21 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
     a_image_df = pd.read_csv(a_camera_csv)
     nd_df = pd.read_csv(nd_projection_csv)
     a_df = pd.read_csv(a_projection_csv)
-    direct_a_to_nd_offset_ms = _estimate_direct_camera_offset(
+    direct_a_to_nd_eval = _estimate_direct_camera_offset(
         reference_df=nd_image_df,
         moving_df=a_image_df,
+        reference_world_df=nd_df if args.camera_space == "world" else None,
+        moving_world_df=a_df if args.camera_space == "world" else None,
         search_ms=args.search_ms,
         rate_hz=args.rate_hz,
     )
     try:
-        nd_offset_ms, a_offset_ms, offset_label = _resolve_fourpanel_offsets(
+        nd_offset_ms, a_offset_ms, offset_label, nd_sync_eval, a_sync_eval = _resolve_fourpanel_offsets(
             seq,
             nd_image_df=nd_image_df,
             a_image_df=a_image_df,
+            nd_world_df=nd_df if args.camera_space == "world" else None,
+            a_world_df=a_df if args.camera_space == "world" else None,
             offset_ms=args.offset_ms,
             search_ms=args.search_ms,
             rate_hz=args.rate_hz,
@@ -1351,8 +1432,12 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
     xlim = (x_lo, x_hi)
 
     mocopi_traces = {k: mocopi_pos.get(k) for k in args.joints}
-    a_traces = {k: a_pos.get(k) for k in args.landmarks}
-    nd_traces = {k: nd_pos.get(k) for k in args.landmarks}
+    camera_display_config = CameraDisplayFeatureConfig(
+        mode=args.camera_display_feature,
+        smooth_window=max(1, int(args.camera_display_smooth_window)),
+    )
+    a_traces = build_camera_display_traces(a_projection, args.landmarks, camera_display_config)
+    nd_traces = build_camera_display_traces(nd_projection, args.landmarks, camera_display_config)
 
     nd_factor = nd_factor_from_stem(pair.nd_video.stem)
     nd_label_text = f"Video ND = {nd_factor:g}" if nd_factor is not None else "Video ND = ?"
@@ -1453,8 +1538,11 @@ def run_fourpanel_triplet(args: argparse.Namespace) -> None:
     print(
         f"Saved four-panel plot to {output_path} "
         f"(camera_space={args.camera_space}, component=d{plot_component}, "
-        f"ND_offset_ms={nd_offset_ms:.1f}, A_offset_ms={a_offset_ms:.1f}, "
-        f"A_to_ND_offset_ms={direct_a_to_nd_offset_ms if direct_a_to_nd_offset_ms is not None else float('nan'):.1f}, "
+        f"camera_display={args.camera_display_feature}, "
+        f"ND_offset_ms={nd_offset_ms:.1f} [{nd_sync_eval.candidate_name}], "
+        f"A_offset_ms={a_offset_ms:.1f} [{a_sync_eval.candidate_name}], "
+        f"A_to_ND_offset_ms={direct_a_to_nd_eval.offset_ms if direct_a_to_nd_eval is not None else float('nan'):.1f} "
+        f"[{direct_a_to_nd_eval.candidate_name if direct_a_to_nd_eval is not None else 'unavailable'}], "
         f"visibility_threshold={args.visibility_threshold:.2f})"
     )
 

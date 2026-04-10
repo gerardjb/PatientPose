@@ -20,9 +20,18 @@ from .camera_projection import (
     CameraProjectionResult,
     compute_camera_projection,
 )
+from .display_features import (
+    CameraDisplayFeatureConfig,
+    build_camera_display_traces,
+)
 from .sync import (
+    SyncCandidate,
+    SyncEvaluation,
+    scan_time_offset_scores,
     estimate_time_offset,
     clean_feature_samples,
+    select_camera_to_mocopi_sync,
+    select_camera_to_camera_sync,
     estimate_camera_to_mocopi_offset,
     estimate_camera_to_camera_offset,
 )
@@ -74,11 +83,18 @@ __all__ = [
     "CameraFeatureConfig",
     "CameraProjectionConfig",
     "CameraProjectionResult",
+    "CameraDisplayFeatureConfig",
     "extract_mocopi_feature",
     "extract_camera_feature",
     "compute_camera_projection",
+    "build_camera_display_traces",
+    "SyncCandidate",
+    "SyncEvaluation",
+    "scan_time_offset_scores",
     "estimate_time_offset",
     "clean_feature_samples",
+    "select_camera_to_mocopi_sync",
+    "select_camera_to_camera_sync",
     "estimate_camera_to_mocopi_offset",
     "estimate_camera_to_camera_offset",
     "CameraRecording",
