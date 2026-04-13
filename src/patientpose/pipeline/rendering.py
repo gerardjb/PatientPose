@@ -265,7 +265,7 @@ def add_fourpanel_triplet_args(parser: argparse.ArgumentParser) -> argparse.Argu
     )
     parser.add_argument(
         "--camera-display-feature",
-        choices=("auto", "raw", "lower-limb-composite"),
+        choices=("auto", "raw", "lower-limb-composite", "distal-foot-composite", "weighted-lower-limb"),
         default="auto",
         help="Which derived camera trace to display. This does not affect sync estimation.",
     )
