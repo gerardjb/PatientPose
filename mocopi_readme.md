@@ -1,6 +1,26 @@
-# Mocopi utilities and scripts
+# Mocopi workflows
 
-This guide summarizes the current Mocopi helpers and the two dataset layouts they support.
+This document describes the current Mocopi-facing workflow surface in this repo.
+
+The primary interface is now the packaged `patientpose` CLI:
+
+```bash
+patientpose --help
+```
+
+From the repo root, install the console entry point with:
+
+```bash
+pip install -e .
+```
+
+If the console script is not installed into the active environment yet, use:
+
+```bash
+python -m patientpose --help
+```
+
+Most of the old `scripts/*.py` entry points still exist as thin wrappers, but they are no longer the preferred surface.
 
 ## Supported data layouts
 
@@ -17,96 +37,296 @@ This guide summarizes the current Mocopi helpers and the two dataset layouts the
 - Pair discovery requires explicit camera-role mapping because the video filenames do not encode `A` vs `ND`.
 
 Example session:
+
 ```text
-sample_data/<sample_file>/
+sample_data/<session_id>/
   session_log.jsonl
-  <sample_file>_mocopi.bin
-  phone_192.168.50.162/<sample_file>.mp4
-  phone_192.168.50.171/<sample_file>.mp4
+  <session_id>_mocopi.bin
+  phone_192.168.50.162/VID_*.mp4
+  phone_192.168.50.171/VID_*.mp4
 ```
 
-## Shared modules
-- `mocopi.recording_io`: `load_mocopi_recording`, `load_mocopi_bin`, `resolve_mocopi_source`
-- `mocopi.nd_pilot`: `CameraRecording`, `CaptureSession`, `TrialPair`, `discover_sessions`, `discover_pairs`, `resolve_session_pair`, `parse_camera_role_specs`
-- `mocopi.sync`: `clean_feature_samples`, `estimate_camera_to_mocopi_offset`
-- `mocopi.reliability`: `export_reliability_errors`, `ensure_reliability_csv`, `best_joint_from_reliability`, `nd_error_summary`, `get_aligned_traces`
-- `mocopi.visualization`: `prepare_camera_landmarks`, `draw_camera_skeleton`, `prepare_mocopi_positions`, `draw_mocopi_skeleton`
+## Camera role mapping
 
-## CLI conventions
+Session-mode pair discovery needs one `--camera-role` per phone:
 
-### Motion input
-- Scripts that previously required `--bvh` now accept `--motion`.
-- `--motion` accepts:
-  - a `.bvh` file
-  - a session `.bin` file
-  - a session directory containing `*_mocopi.bin`
-- `--bvh` is still accepted as a compatibility alias in the direct motion-loading scripts.
+```bash
+--camera-role 192.168.50.162=A
+--camera-role 192.168.50.171=ND
+```
 
-### Session camera-role mapping
-- Pair-based scripts need `--camera-role` when working with session folders.
-- Use one argument per camera:
-  - `--camera-role 192.168.50.162=A`
-  - `--camera-role 192.168.50.171=ND`
-- Accepted roles are `A` and `ND`.
-- Mapping keys can be the bare camera id or the `phone_<camera_id>` directory name.
+Accepted roles are `A` and `ND`. Mapping keys can be either the bare camera id or the `phone_<camera_id>` directory name.
 
-## CLI examples
+## Preprocess artifacts
 
+Run standard video preprocessing with:
+
+```bash
+patientpose preprocess video -f sample_data/test-1.MOV
+```
+
+Standard preprocessing writes:
+- `results/OutputVideos/deidentified_<stem>.avi`
+- `results/OutputVideos/deidentified_no_keypoints_<stem>.avi`
+- `results/OutputCSVs/landmarks_<stem>.csv`
+- `results/OutputCSVs/pose_world_<stem>.csv`
+- `results/OutputCSVs/landmarks_summary_<stem>.csv`
+- `results/OutputCSVs/landmarks_metadata_<stem>.json`
+
+Notes:
+- `landmarks_<stem>.csv` is the image-space landmark table used for overlays, QA, and video-linked tooling.
+- `pose_world_<stem>.csv` is the world-space pose table used for gait-oriented diagnostics and Mocopi comparison.
+- Both CSVs are written even when no pose landmarks are detected; the files will then be empty but schema-correct.
+- `landmarks_metadata_<stem>.json` records orientation handling and linked artifacts.
+
+The quality-video workflow remains available:
+
+```bash
+patientpose preprocess quality-video -f sample_data/20250408_fingerTap_decrement.mp4
+```
+
+That writes:
+- `results/OutputVideos/quality_vis_<stem>.avi`
+- `results/OutputVideos/quality_vis_no_keypoints_<stem>.avi`
+- `results/OutputCSVs/landmarks_<stem>.csv`
+- `results/OutputCSVs/pose_world_<stem>.csv`
+- `results/OutputCSVs/landmarks_metadata_<stem>.json`
+- `results/OutputPlots/fingertip_position_<stem>.png`
+- `results/OutputPlots/fingertip_quality_<stem>.png`
+
+## Analyze workflows
+
+### Direct reliability export
+
+Use this when you already know the exact motion file and camera CSV:
+
+```bash
+patientpose analyze reliability \
+  --motion sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
+  --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv
+```
+
+Useful options:
+- `--camera-space image|world`
+- `--world-csv <path>` if you want to override the paired `pose_world_*.csv`
+- `--offset_ms` to force a known offset
+- `--clip-start` / `--clip-end` to restrict offset estimation to a cleaner segment
+
+### Batch reliability export
+
+Use this to process discovered pairs:
+
+```bash
+patientpose analyze reliability-batch \
+  --camera-role 192.168.50.162=A \
+  --camera-role 192.168.50.171=ND
+```
+
+Useful options:
+- `--tags 1a 2a` for legacy subsets
+- `--tags <data root>` for session subsets
+- `--camera-space image|world`
+- `--output-dir results/mocopi_reliability`
+
+## Report workflows
+
+### Pair report
+
+This generates per-pair plots and ND-vs-A summary outputs:
+
+```bash
+patientpose report pair-report \
+  --tags <data root> \
+  --camera-role 192.168.50.162=A \
+  --camera-role 192.168.50.171=ND
+```
+
+Useful options:
+- `--camera-space image|world`
+- `--plot-component x|y|z`
+- `--offset_ms` to force a shared offset
+- `--clip_start` / `--clip_end` to restrict offset estimation and plots
+
+Outputs live under `results/mocopi_reliability/`, including:
+- `nd_delta_summary_<space>.csv`
+- `nd_ratio_summary_<space>.pdf`
+- `plots/<space>/pair_<tag>_<joint>.pdf`
+
+## Render workflows
+
+### Side-by-side video
+
+Use this for a direct camera-vs-Mocopi panel render:
+
+```bash
+patientpose render side-by-side \
+  --motion sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
+  --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv
+```
+
+Useful options:
+- `--video <path>` to override the inferred camera-panel video
+- `--camera-panel-source auto|deidentified|deidentified-no-keypoints|raw`
+- `--video-rotation auto|none|90cw|90ccw|180`
+- `--mocopi-view body-centered|walk-range`
+
+By default, `auto` camera panels prefer:
+1. `deidentified_<stem>.avi`
+2. `deidentified_no_keypoints_<stem>.avi`
+3. the raw source video
+
+### Triplet video
+
+Use this for A / ND / Mocopi video triplets:
+
+```bash
+patientpose render triplet-video \
+  --tags <data root> \
+  --camera-role 192.168.50.162=A \
+  --camera-role 192.168.50.171=ND
+```
+
+Useful options:
+- `--camera-panel-source auto|deidentified|deidentified-no-keypoints|raw`
+- `--offset_ms` to force a shared offset
+- `--max_frames`
+- `--video-rotation auto|none|90cw|90ccw|180`
+- `--mocopi-view body-centered|walk-range`
+
+Outputs default to:
+- `results/OutputVideos/triplets/triplet_<tag>.avi`
+
+### Four-panel triplet plot
+
+Use this for A / ND / Mocopi egocentric trace comparison:
+
+```bash
+patientpose render fourpanel-triplet \
+  --tag <data root> \
+  --camera-role 192.168.50.162=A \
+  --camera-role 192.168.50.171=ND
+```
+
+Useful options:
+- `--camera-space image|world`
+- `--plot-component x|y|z`
+- `--camera-display-feature auto|raw|lower-limb-composite|distal-foot-composite|weighted-lower-limb`
+- `--camera-display-smooth-window N`
+- `--offset-ms <ms>` to override automatic sync
+
+Current behavior:
+- If `--offset-ms` is omitted, offsets are estimated by cross-correlation.
+- The sync feature and the plotted camera feature are now separate concerns.
+- Cross-correlation uses a scored candidate bank rather than a hard-coded wrist-only feature.
+- Four-panel filenames encode camera space, plotted component, offset mode, and visibility threshold.
+
+Example world-space gait view:
+
+```bash
+patientpose render fourpanel-triplet \
+  --tag <data root> \
+  --camera-role 192.168.50.162=A \
+  --camera-role 192.168.50.171=ND \
+  --camera-space world \
+  --plot-component z \
+  --camera-display-feature distal-foot-composite \
+  --camera-display-smooth-window 9
+```
+
+Outputs default to:
+- `results/OutputPlots/fourpanel_<tag>_<space>_d<component>_<offset-label>_vis_<threshold>.pdf`
+
+## Diagnostics workflows
+
+### Egocentric component plots
+
+Use this to inspect camera projection quality directly:
+
+```bash
+patientpose diagnose egocentric-plot \
+  --tag <data root> \
+  --camera-side ND \
+  --camera-role 192.168.50.162=A \
+  --camera-role 192.168.50.171=ND \
+  --space world \
+  --components y z \
+  --body-frame
+```
+
+Useful options:
+- `--camera_csv <path>` instead of `--tag`
+- `--space image|world`
+- `--world_csv <path>`
+- `--landmarks LEFT_ANKLE RIGHT_ANKLE`
+- `--components x y z`
+- `--smooth-window N`
+
+### Egocentric overlay video
+
+Use this to inspect the projected signal against the video:
+
+```bash
+patientpose diagnose egocentric-video \
+  --tag <data root> \
+  --camera-side ND \
+  --camera-role 192.168.50.162=A \
+  --camera-role 192.168.50.171=ND \
+  --space world \
+  --components y z \
+  --body-frame
+```
+
+Useful options:
+- `--video <path>` to override the inferred panel video
+- `--camera-panel-source auto|deidentified|deidentified-no-keypoints|raw`
+- `--video-rotation auto|none|90cw|90ccw|180`
+- `--max-frames N`
+
+Diagnostics outputs default to:
+- `results/Diagnostics/egocentric/<stem>_<space>_<frame-mode>_components.pdf`
+- `results/Diagnostics/egocentric/<stem>_<space>_<frame-mode>_overlay.avi`
+
+## Image space vs world space
+
+Use image-space pose when the task needs to line up with pixels:
+- overlay rendering
+- deidentification
+- orientation checks
+- frame-level QA
+
+Use world-space pose when the task is primarily kinematic:
+- gait diagnostics
+- Mocopi comparison
+- egocentric trace inspection
+- world-space four-panel plots
+
+In practice:
+- `--camera-space world` is the better default for gait-oriented comparisons.
+- `--space image` remains useful for troubleshooting whether the raw 2D tracking itself is the problem.
+
+## Sync behavior
+
+Current sync estimation is no longer based on a single hard-coded wrist trace.
+
+Instead:
+- camera-to-Mocopi sync uses a scored bank of candidate features
+- gait-oriented world-space lower-limb features are preferred when available
+- direct camera-to-camera offset is also estimated and reported in the render workflows
+
+The render and report outputs now separate:
+- sync feature selection
+- plotted camera trace selection
+
+This matters for gait, where a feature that is robust for offset estimation is not always the cleanest feature to display.
+
+## Legacy wrappers
+
+These packaged workflows currently still have thin wrapper scripts under `scripts/`, but prefer the `patientpose` command:
+- `scripts/sample_patient_processing.py`
+- `scripts/process_video_for_blur.py`
 - `scripts/mocopi_reliability_export.py`
-  ```bash
-  python -m scripts.mocopi_reliability_export \
-    --motion sample_data/ND_pilot/'Re_ Mocopi'/MCPM_20251112_135620_1a.bvh \
-    --camera_csv results/OutputCSVs/landmarks_ND_1a_20140107_104046.csv \
-    --output results/mocopi_reliability/mocopi_camera_reliability_ND_1a_20140107_104046.csv
-  ```
-
-- `scripts/mocopi_sync_example.py`
-  ```bash
-  python -m scripts.mocopi_sync_example \
-    --motion sample_data/<sample_file> \
-    --camera_csv results/OutputCSVs/landmarks_<sample_file>.csv
-  ```
-
 - `scripts/mocopi_reliability_batch.py`
-  ```bash
-  python -m scripts.mocopi_reliability_batch \
-    --camera-role 192.168.50.162=A \
-    --camera-role 192.168.50.171=ND
-  ```
-
-- `scripts/mocopi_triplet_video.py`
-  ```bash
-  python -m scripts.mocopi_triplet_video \
-    --tags <sample_file> \
-    --camera-role 192.168.50.162=A \
-    --camera-role 192.168.50.171=ND \
-    --output-dir results/OutputVideos/triplets
-  ```
-
 - `scripts/mocopi_pair_report.py`
-  ```bash
-  python -m scripts.mocopi_pair_report \
-    --camera-role 192.168.50.162=A \
-    --camera-role 192.168.50.171=ND
-  ```
-
+- `scripts/mocopi_side_by_side.py`
+- `scripts/mocopi_triplet_video.py`
 - `scripts/mocopi_fourpanel_triplet.py`
-  ```bash
-  python -m scripts.mocopi_fourpanel_triplet \
-    --tag <sample_file> \
-    --camera-role 192.168.50.162=A \
-    --camera-role 192.168.50.171=ND
-  ```
-
-- `scripts/mocopi_symmetry_diagnostics.py`
-  ```bash
-  python -m scripts.mocopi_symmetry_diagnostics \
-    --camera-role 192.168.50.162=A \
-    --camera-role 192.168.50.171=ND
-  ```
-
-## Outputs and conventions
-- Camera CSVs are still expected under `results/OutputCSVs/landmarks_<video_stem>.csv`.
-- Reliability CSVs are written under `results/mocopi_reliability/`.
-- Video outputs are written under `results/OutputVideos/`.
-- Legacy ND-factor parsing still comes from the ND video stem, so ND summary workflows remain meaningful only for legacy `ND_*` naming or any future session naming scheme that encodes ND level explicitly.
