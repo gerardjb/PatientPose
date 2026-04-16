@@ -11,8 +11,12 @@ from patientpose.pipeline.analyze import (
 from patientpose.pipeline.diagnostics import (
     add_egocentric_plot_args,
     add_egocentric_video_args,
+    add_landmark_metric_plot_args,
+    add_landmark_traces_args,
     run_egocentric_plot,
     run_egocentric_video,
+    run_landmark_metric_plot,
+    run_landmark_traces,
 )
 from patientpose.pipeline.preprocess import (
     add_preprocess_quality_video_args,
@@ -137,6 +141,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_egocentric_video_args(diagnose_video_parser)
     diagnose_video_parser.set_defaults(handler=run_egocentric_video)
+
+    diagnose_landmark_traces_parser = diagnose_subparsers.add_parser(
+        "landmark-traces",
+        help="Plot arbitrary landmark component traces over time from a camera CSV.",
+    )
+    add_landmark_traces_args(diagnose_landmark_traces_parser)
+    diagnose_landmark_traces_parser.set_defaults(handler=run_landmark_traces)
+
+    diagnose_landmark_metric_parser = diagnose_subparsers.add_parser(
+        "landmark-metric-plot",
+        help="Plot a derived metric over arbitrary landmark sets from a camera CSV.",
+    )
+    add_landmark_metric_plot_args(diagnose_landmark_metric_parser)
+    diagnose_landmark_metric_parser.set_defaults(handler=run_landmark_metric_plot)
 
     return parser
 
