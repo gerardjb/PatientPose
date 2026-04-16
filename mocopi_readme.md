@@ -152,6 +152,53 @@ Outputs live under `results/mocopi_reliability/`, including:
 - `nd_ratio_summary_<space>.pdf`
 - `plots/<space>/pair_<tag>_<joint>.pdf`
 
+### Landmark metric CSV export
+
+Use this when you want machine-readable per-frame traces and one-row summaries rather than plots:
+
+```bash
+patientpose report landmark-metric-export \
+  --camera_csv results/OutputCSVs/landmarks_20250408_fingerTap_decrement.csv \
+  --source hand \
+  --handedness Right \
+  --metric thumb-index-distance
+```
+
+Useful options:
+- `--space image|world`
+- `--components x y z`
+- `--quality-threshold`
+- `--smooth-window N`
+- `--trace-output <path>`
+- `--summary-output <path>`
+
+Default outputs live under:
+- `results/Reports/landmark_metrics/<stem>_<source>_<space>_<metric>_trace.csv`
+- `results/Reports/landmark_metrics/<stem>_<source>_<space>_<metric>_summary.csv`
+
+### Landmark metric batch export
+
+Use this to aggregate many landmark CSVs into one long-form trace table and one summary table:
+
+```bash
+patientpose report landmark-metric-batch \
+  --glob "results/OutputCSVs/landmarks_20250408_fingerTap_decrement.csv" \
+  --source hand \
+  --handedness Right \
+  --metric thumb-index-distance
+```
+
+Useful options:
+- `--camera-csvs <csv1> <csv2> ...`
+- `--glob <pattern>`
+- `--space image|world`
+- `--trace-output <path>`
+- `--summary-output <path>`
+
+Default outputs live under:
+- `results/Reports/landmark_metrics/batch_<source>_<space>_<metric>_traces.csv`
+- `results/Reports/landmark_metrics/batch_<source>_<space>_<metric>_summary.csv`
+
 ## Render workflows
 
 ### Side-by-side video

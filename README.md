@@ -123,6 +123,22 @@ python -m patientpose diagnose landmark-overlay-video \
   * `landmark-metric-plot` plots derived metrics such as pairwise distance, delta, centroid distance, angle, thumb-index distance, and pinch velocity.
   * `landmark-overlay-video` highlights the selected image-space landmarks on the video and adds a rolling derived-metric strip at the bottom.
   * For camera CSVs with `quality_score`, `--quality-threshold` can blank low-quality samples before plotting.
+  * If you want machine-readable CSV outputs instead of plots, use the `report` surface:
+  ```bash
+  python -m patientpose report landmark-metric-export \
+    --camera_csv results/OutputCSVs/landmarks_20250408_fingerTap_decrement.csv \
+    --source hand \
+    --handedness Right \
+    --metric thumb-index-distance
+  ```
+  ```bash
+  python -m patientpose report landmark-metric-batch \
+    --glob "results/OutputCSVs/landmarks_20250408_fingerTap_decrement.csv" \
+    --source hand \
+    --handedness Right \
+    --metric thumb-index-distance
+  ```
+    - These write long-form trace and summary CSVs under `results/Reports/landmark_metrics/`.
 - A labeling GUI for batching metadata entry lives at `scripts/video_labeling_gui.py`. It relies on the community-maintained `FreeSimpleGUI` package bundled with the project dependencies. Launch it from the `scripts` directory with:
 ```bash
 python video_labeling_gui.py
