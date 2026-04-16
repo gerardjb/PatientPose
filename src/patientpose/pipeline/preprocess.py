@@ -9,12 +9,9 @@ from typing import List
 os.environ.setdefault("MEDIAPIPE_SKIP_AUDIO", "1")
 
 import cv2
-import matplotlib
 import mediapipe as mp
 import numpy as np
 import pandas as pd
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 from analysis_tools.landmark_utils import (
     INDEX_FINGER_TIP_INDEX,
@@ -25,11 +22,13 @@ from analysis_tools.landmark_utils import (
 from image_overlays import draw_pose_landmarks
 from patientpose.artifacts import ArtifactStore, PreprocessVideoArtifacts, QualityVideoArtifacts
 from patientpose.config import ProjectPaths, resolve_project_paths
+from patientpose.diagnostics import TraceSpec, plot_metric_panels, plot_metric_trace
 from patientpose.landmarks import (
     FRAME_SUMMARY_COLUMNS,
     IMAGE_LANDMARK_COLUMNS,
     QUALITY_LANDMARK_COLUMNS,
     WORLD_LANDMARK_COLUMNS,
+    build_multi_landmark_series,
 )
 from video_tools import blur_face_with_pose, determine_rotation_code, rotate_frame
 from video_tools.image_quality_utils import (
@@ -453,137 +452,178 @@ def _save_quality_plots(
         print("Skipping plotting: Landmark DataFrame is empty.")
         return
 
-    right_hand_df = landmarks_df[
-        (landmarks_df["source"] == "hand") & (landmarks_df["handedness"] == "Right")
-    ].copy()
+    series_map = build_multi_landmark_series(
+        landmarks_df,
+        [INDEX_FINGER_TIP_INDEX, THUMB_TIP_INDEX],
+        source="hand",
+        handedness="Right",
+        components=("x", "y"),
+        extra_columns=("laplacian_variance", "mean_motion_diff", "quality_score"),
+    )
 
-    index_tip_df = right_hand_df[right_hand_df["landmark_id"] == INDEX_FINGER_TIP_INDEX]
-    thumb_tip_df = right_hand_df[right_hand_df["landmark_id"] == THUMB_TIP_INDEX]
+    index_tip_df = series_map.get("INDEX_FINGER_TIP")
+    thumb_tip_df = series_map.get("THUMB_TIP")
 
-    if not index_tip_df.empty or not thumb_tip_df.empty:
-        fig1, ax1 = plt.subplots(figsize=(12, 5))
-        if not index_tip_df.empty:
-            ax1.plot(
-                index_tip_df["frame"],
-                index_tip_df["y"],
+    def _has_trace(df: pd.DataFrame | None, column: str) -> bool:
+        return df is not None and column in df.columns and df[column].notna().any()
+
+    position_traces: list[TraceSpec] = []
+    if _has_trace(index_tip_df, "y"):
+        position_traces.append(
+            TraceSpec(
                 label="Right Index Tip Y",
+                df=index_tip_df,
+                y_column="y",
+                x_column="frame",
                 color="red",
                 marker=".",
-                linestyle="-",
-                markersize=4,
             )
-        if not thumb_tip_df.empty:
-            ax1.plot(
-                thumb_tip_df["frame"],
-                thumb_tip_df["y"],
+        )
+    if _has_trace(thumb_tip_df, "y"):
+        position_traces.append(
+            TraceSpec(
                 label="Right Thumb Tip Y",
+                df=thumb_tip_df,
+                y_column="y",
+                x_column="frame",
                 color="blue",
                 marker=".",
-                linestyle="-",
-                markersize=4,
             )
-        ax1.set_xlabel("Frame Number", fontsize=12)
-        ax1.set_ylabel("Normalized Y Position", fontsize=12)
-        ax1.set_title(f"Right Fingertip Y Position Over Time ({video_name_tag})", fontsize=14)
-        ax1.legend(fontsize=10)
-        ax1.grid(True, linestyle="--", alpha=0.6)
-        ax1.invert_yaxis()
-        fig1.savefig(artifacts.position_plot, format="png", dpi=150, bbox_inches="tight")
-        plt.close(fig1)
+        )
+
+    if position_traces:
+        plot_metric_trace(
+            position_traces,
+            artifacts.position_plot,
+            title=f"Right Fingertip Y Position Over Time ({video_name_tag})",
+            y_label="Normalized Y Position",
+            x_label="Frame Number",
+            invert_y=True,
+        )
         print(f"Position plot saved successfully as: {artifacts.position_plot}")
     else:
         print("Skipping position plot: No data found for right index or thumb tip.")
 
     quality_cols = ["laplacian_variance", "mean_motion_diff", "quality_score"]
-    if all(col in landmarks_df.columns for col in quality_cols) and (
-        not index_tip_df.empty or not thumb_tip_df.empty
-    ):
-        fig2, axes2 = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
-        if not index_tip_df.empty:
-            axes2[0].plot(
-                index_tip_df["frame"],
-                index_tip_df["laplacian_variance"],
-                label="Index Tip",
-                color="red",
-                marker=".",
-                linestyle="-",
-                markersize=3,
-                alpha=0.7,
-            )
-        if not thumb_tip_df.empty:
-            axes2[0].plot(
-                thumb_tip_df["frame"],
-                thumb_tip_df["laplacian_variance"],
-                label="Thumb Tip",
-                color="blue",
-                marker=".",
-                linestyle="-",
-                markersize=3,
-                alpha=0.7,
-            )
-        axes2[0].set_ylabel("Laplacian Var\n(Sharpness)", fontsize=10)
-        axes2[0].set_title(f"Landmark Quality Metrics Over Time ({video_name_tag})", fontsize=14)
-        axes2[0].legend(fontsize=9)
-        axes2[0].grid(True, linestyle="--", alpha=0.6)
+    has_quality = all(col in landmarks_df.columns for col in quality_cols)
+    if has_quality and position_traces:
+        quality_panels: list[tuple[str, list[TraceSpec]]] = [
+            (
+                "Sharpness",
+                [
+                    TraceSpec(
+                        label="Index Tip",
+                        df=index_tip_df,
+                        y_column="laplacian_variance",
+                        x_column="frame",
+                        color="red",
+                        marker=".",
+                        alpha=0.7,
+                    )
+                ]
+                if _has_trace(index_tip_df, "laplacian_variance")
+                else [],
+            ),
+            (
+                "Motion",
+                [
+                    TraceSpec(
+                        label="Index Tip",
+                        df=index_tip_df,
+                        y_column="mean_motion_diff",
+                        x_column="frame",
+                        color="red",
+                        marker=".",
+                        alpha=0.7,
+                    )
+                ]
+                if _has_trace(index_tip_df, "mean_motion_diff")
+                else [],
+            ),
+            (
+                "Quality",
+                [
+                    TraceSpec(
+                        label="Index Tip",
+                        df=index_tip_df,
+                        y_column="quality_score",
+                        x_column="frame",
+                        color="red",
+                        marker=".",
+                        alpha=0.7,
+                    )
+                ]
+                if _has_trace(index_tip_df, "quality_score")
+                else [],
+            ),
+        ]
 
-        if not index_tip_df.empty:
-            axes2[1].plot(
-                index_tip_df["frame"],
-                index_tip_df["mean_motion_diff"],
-                label="Index Tip",
-                color="red",
-                marker=".",
-                linestyle="-",
-                markersize=3,
-                alpha=0.7,
+        if _has_trace(thumb_tip_df, "laplacian_variance"):
+            quality_panels[0][1].append(
+                TraceSpec(
+                    label="Thumb Tip",
+                    df=thumb_tip_df,
+                    y_column="laplacian_variance",
+                    x_column="frame",
+                    color="blue",
+                    marker=".",
+                    alpha=0.7,
+                )
             )
-        if not thumb_tip_df.empty:
-            axes2[1].plot(
-                thumb_tip_df["frame"],
-                thumb_tip_df["mean_motion_diff"],
-                label="Thumb Tip",
-                color="blue",
-                marker=".",
-                linestyle="-",
-                markersize=3,
-                alpha=0.7,
+        if _has_trace(thumb_tip_df, "mean_motion_diff"):
+            quality_panels[1][1].append(
+                TraceSpec(
+                    label="Thumb Tip",
+                    df=thumb_tip_df,
+                    y_column="mean_motion_diff",
+                    x_column="frame",
+                    color="blue",
+                    marker=".",
+                    alpha=0.7,
+                )
             )
-        axes2[1].set_ylabel("Mean Motion Diff\n(Motion)", fontsize=10)
-        axes2[1].grid(True, linestyle="--", alpha=0.6)
+        if _has_trace(thumb_tip_df, "quality_score"):
+            quality_panels[2][1].append(
+                TraceSpec(
+                    label="Thumb Tip",
+                    df=thumb_tip_df,
+                    y_column="quality_score",
+                    x_column="frame",
+                    color="blue",
+                    marker=".",
+                    alpha=0.7,
+                )
+            )
 
-        if not index_tip_df.empty:
-            axes2[2].plot(
-                index_tip_df["frame"],
-                index_tip_df["quality_score"],
-                label="Index Tip",
-                color="red",
-                marker=".",
-                linestyle="-",
-                markersize=3,
-                alpha=0.7,
+        nonempty_panels: list[tuple[str, list[TraceSpec]]] = []
+        nonempty_y_labels: list[str] = []
+        for (panel_title, traces), y_label in zip(
+            quality_panels,
+            (
+                "Laplacian Var\n(Sharpness)",
+                "Mean Motion Diff\n(Motion)",
+                "Quality Score",
+            ),
+        ):
+            if traces:
+                nonempty_panels.append((panel_title, traces))
+                nonempty_y_labels.append(y_label)
+        if nonempty_panels:
+            plot_metric_panels(
+                nonempty_panels,
+                artifacts.quality_plot,
+                title=f"Landmark Quality Metrics Over Time ({video_name_tag})",
+                y_labels=nonempty_y_labels,
+                x_label="Frame Number",
             )
-        if not thumb_tip_df.empty:
-            axes2[2].plot(
-                thumb_tip_df["frame"],
-                thumb_tip_df["quality_score"],
-                label="Thumb Tip",
-                color="blue",
-                marker=".",
-                linestyle="-",
-                markersize=3,
-                alpha=0.7,
-            )
-        axes2[2].set_ylabel("Quality Score", fontsize=10)
-        axes2[2].set_xlabel("Frame Number", fontsize=12)
-        axes2[2].grid(True, linestyle="--", alpha=0.6)
+            if _has_trace(index_tip_df, "quality_score"):
+                print(f"Mean quality score for index tip: {index_tip_df['quality_score'].mean()}")
+            if _has_trace(thumb_tip_df, "quality_score"):
+                print(f"Mean quality score for thumb tip: {thumb_tip_df['quality_score'].mean()}")
 
-        print(f"Mean quality score for index tip: {index_tip_df['quality_score'].mean()}")
-        print(f"Mean quality score for thumb tip: {thumb_tip_df['quality_score'].mean()}")
-
-        plt.tight_layout(rect=[0, 0.03, 1, 0.97])
-        fig2.savefig(artifacts.quality_plot, format="png", dpi=150, bbox_inches="tight")
-        plt.close(fig2)
-        print(f"Quality plot saved successfully as: {artifacts.quality_plot}")
+            print(f"Quality plot saved successfully as: {artifacts.quality_plot}")
+        else:
+            print("Skipping quality plot: Quality columns not found in DataFrame or no landmark data.")
     else:
         print("Skipping quality plot: Quality columns not found in DataFrame or no landmark data.")
 

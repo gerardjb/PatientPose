@@ -64,16 +64,17 @@ def plot_landmark_components(
     if len(component_names) == 1:
         axes = [axes]
 
+    resolved_x_label = "Time (s)"
     for axis, component in zip(axes, component_names):
         for label, series_df in series_map.items():
             trace = TraceSpec(label=label, df=series_df, y_column=component)
-            x_label = _plot_trace(axis, trace)
+            resolved_x_label = _plot_trace(axis, trace)
         axis.set_ylabel(component)
         axis.grid(alpha=0.3)
         axis.legend(loc="upper right", fontsize=8, frameon=False)
         if component in invert_components:
             axis.invert_yaxis()
-    axes[-1].set_xlabel(x_label)
+    axes[-1].set_xlabel(resolved_x_label)
     fig.suptitle(title)
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,18 +88,22 @@ def plot_metric_trace(
     *,
     title: str,
     y_label: str = "value",
+    x_label: str | None = None,
+    invert_y: bool = False,
 ) -> None:
     if not traces:
         raise ValueError("traces must contain at least one TraceSpec.")
 
     fig, ax = plt.subplots(figsize=(10, 3.5))
-    x_label = "Time (s)"
+    resolved_x_label = "Time (s)"
     for trace in traces:
-        x_label = _plot_trace(ax, trace)
-    ax.set_xlabel(x_label)
+        resolved_x_label = _plot_trace(ax, trace)
+    ax.set_xlabel(x_label if x_label is not None else resolved_x_label)
     ax.set_ylabel(y_label)
     ax.grid(alpha=0.3)
     ax.legend(loc="upper right", fontsize=8, frameon=False)
+    if invert_y:
+        ax.invert_yaxis()
     fig.suptitle(title)
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +117,7 @@ def plot_metric_panels(
     *,
     title: str,
     y_labels: Sequence[str] | None = None,
+    x_label: str | None = None,
 ) -> None:
     if not panels:
         raise ValueError("panels must contain at least one panel definition.")
@@ -120,17 +126,17 @@ def plot_metric_panels(
     if len(panels) == 1:
         axes = [axes]
 
+    resolved_x_label = "Time (s)"
     for idx, ((panel_title, traces), axis) in enumerate(zip(panels, axes)):
         if not traces:
             raise ValueError(f"Panel '{panel_title}' must contain at least one TraceSpec.")
-        x_label = "Time (s)"
         for trace in traces:
-            x_label = _plot_trace(axis, trace)
+            resolved_x_label = _plot_trace(axis, trace)
         axis.set_title(panel_title, fontsize=10)
         axis.set_ylabel(y_labels[idx] if y_labels is not None and idx < len(y_labels) else "value")
         axis.grid(alpha=0.3)
         axis.legend(loc="upper right", fontsize=8, frameon=False)
-    axes[-1].set_xlabel(x_label)
+    axes[-1].set_xlabel(x_label if x_label is not None else resolved_x_label)
     fig.suptitle(title)
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
