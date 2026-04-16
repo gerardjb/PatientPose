@@ -316,9 +316,27 @@ Useful options:
 - `--smooth-window N`
 - `--metric distance|delta|centroid-distance|angle|thumb-index-distance|pinch-velocity`
 
+Overlay video with selected landmarks plus a rolling metric strip:
+
+```bash
+patientpose diagnose landmark-overlay-video \
+  --camera_csv results/OutputCSVs/landmarks_20250408_fingerTap_decrement.csv \
+  --source hand \
+  --handedness Right \
+  --metric thumb-index-distance \
+  --video results/OutputVideos/deidentified_no_keypoints_20250408_fingerTap_decrement.avi
+```
+
+Useful options:
+- `--camera-panel-source auto|deidentified|deidentified-no-keypoints|raw`
+- `--video-rotation auto|none|90cw|90ccw|180`
+- `--trace-window-seconds N`
+- `--max-frames N`
+
 Default outputs live under:
 - `results/Diagnostics/landmarks/<stem>_<source>_<space>_<components>_traces.png`
 - `results/Diagnostics/landmarks/<stem>_<source>_<space>_<metric>.png`
+- `results/Diagnostics/landmarks/<stem>_<source>_<space>_<metric>_overlay.avi`
 
 ## Image space vs world space
 

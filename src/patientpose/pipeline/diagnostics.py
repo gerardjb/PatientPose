@@ -15,6 +15,7 @@ from patientpose.diagnostics import (
     plot_metric_trace,
     plot_projection_components,
     prepare_pose_landmarks_by_frame,
+    render_landmark_overlay_video,
     render_projection_overlay_video,
 )
 from patientpose.landmarks import build_multi_landmark_series, landmark_stem_from_image_csv, load_landmark_views
@@ -292,6 +293,73 @@ def add_landmark_metric_plot_args(parser: argparse.ArgumentParser) -> argparse.A
         type=Path,
         default=None,
         help="Optional explicit output path for the metric plot.",
+    )
+    return parser
+
+
+def add_landmark_overlay_video_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    add_landmark_common_args(parser)
+    parser.set_defaults(components=["x", "y"])
+    parser.add_argument(
+        "--metric",
+        choices=(
+            "distance",
+            "delta",
+            "centroid-distance",
+            "angle",
+            "thumb-index-distance",
+            "pinch-velocity",
+        ),
+        default="distance",
+        help="Derived metric to render in the rolling trace panel.",
+    )
+    parser.add_argument(
+        "--delta-component",
+        choices=("x", "y", "z"),
+        default=None,
+        help="Component to use for the delta metric. Defaults to the first component in --components.",
+    )
+    parser.add_argument(
+        "--video",
+        type=Path,
+        default=None,
+        help="Explicit path to the camera-panel video. Overrides --camera-panel-source.",
+    )
+    parser.add_argument(
+        "--camera-panel-source",
+        choices=("auto", "deidentified", "deidentified-no-keypoints", "raw"),
+        default="auto",
+        help="What to show under the landmark overlays when --video is not given.",
+    )
+    parser.add_argument(
+        "--video-rotation",
+        choices=("auto", "none", "90cw", "90ccw", "180"),
+        default="auto",
+        help="Rotation to apply to raw camera videos before drawing overlays.",
+    )
+    parser.add_argument(
+        "--orientation-max-scan",
+        type=int,
+        default=None,
+        help="Maximum number of frames to scan when --video-rotation=auto.",
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=None,
+        help="Optional maximum number of frames to render.",
+    )
+    parser.add_argument(
+        "--trace-window-seconds",
+        type=float,
+        default=3.0,
+        help="Rolling history window for the bottom trace strip.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional explicit output path for the overlay video.",
     )
     return parser
 
@@ -692,13 +760,117 @@ def run_landmark_metric_plot(args: argparse.Namespace) -> None:
     print(f"Saved landmark metric plot to {output_path}")
 
 
+def run_landmark_overlay_video(args: argparse.Namespace) -> None:
+    if args.source == "hand" and args.space == "world":
+        raise SystemExit("Hand landmarks currently support overlay video only in image space.")
+
+    paths = resolve_project_paths(args.project_root)
+    artifact_store = ArtifactStore(paths)
+    artifact_store.ensure_standard_dirs()
+    camera_csv_path, resolved_video_path, _ = _resolve_camera_inputs(
+        project_root=paths.root,
+        camera_csv=args.camera_csv,
+        tag=args.tag,
+        camera_side=args.camera_side,
+        camera_role_specs=args.camera_role,
+    )
+
+    explicit_video_path = _resolve_cli_path(args.video, paths.root) if args.video is not None else resolved_video_path
+    video_path, panel_source = _resolve_camera_panel_video(
+        camera_csv_path=camera_csv_path,
+        explicit_video_path=explicit_video_path,
+        project_root=paths.root,
+        panel_source=args.camera_panel_source,
+    )
+    rotation_code, rotation_source = _resolve_video_rotation_code(
+        video_path,
+        camera_csv_path,
+        paths,
+        args.video_rotation,
+        args.orientation_max_scan,
+    )
+
+    landmark_views = load_landmark_views(
+        camera_csv_path,
+        project_root=paths.root,
+        world_csv=_resolve_cli_path(args.world_csv, paths.root) if args.world_csv is not None else None,
+        require_world=args.space == "world",
+    )
+    metric_df_source = landmark_views.world_df if args.space == "world" else landmark_views.image_df
+    if metric_df_source is None:
+        raise SystemExit(f"No {args.space}-space landmark data available for {camera_csv_path}.")
+    image_df = landmark_views.image_df
+    stem = landmark_stem_from_image_csv(camera_csv_path)
+    components = _normalize_components(args.components, default=["x", "y"])
+    landmarks = _resolve_metric_landmarks(args.metric, args.landmarks)
+
+    computation_series_map = _build_landmark_series_map(
+        metric_df_source,
+        landmarks=landmarks,
+        source=args.source,
+        handedness=args.handedness,
+        instance_id=args.instance_id,
+        components=components,
+        quality_threshold=args.quality_threshold,
+        smooth_window=args.smooth_window,
+    )
+    overlay_series_map = _build_landmark_series_map(
+        image_df,
+        landmarks=landmarks,
+        source=args.source,
+        handedness=args.handedness,
+        instance_id=args.instance_id,
+        components=["x", "y"],
+        quality_threshold=args.quality_threshold,
+        smooth_window=1,
+    )
+    metric_df, label = _compute_metric_trace(
+        metric=args.metric,
+        series_map=computation_series_map,
+        components=components,
+        delta_component=args.delta_component,
+    )
+
+    output_path = (
+        _resolve_cli_path(args.output, paths.root)
+        if args.output is not None
+        else artifact_store.landmark_overlay_diagnostics(
+            stem,
+            source=args.source,
+            space=args.space,
+            metric=args.metric,
+        ).output_video
+    )
+    pose_landmarks_by_frame = (
+        prepare_pose_landmarks_by_frame(image_df, visibility_threshold=None)
+        if args.source == "pose"
+        else {}
+    )
+    render_landmark_overlay_video(
+        video_path=video_path,
+        landmark_series_map=overlay_series_map,
+        metric_df=metric_df,
+        metric_label=label,
+        output_path=output_path,
+        rotation_code=rotation_code,
+        max_frames=args.max_frames,
+        title=f"Landmark overlay: {stem}",
+        overlay_label=f"{args.source} | {args.space} | {panel_source} | {rotation_source}",
+        trace_window_seconds=args.trace_window_seconds,
+        pose_landmarks_by_frame=pose_landmarks_by_frame,
+    )
+    print(f"Saved landmark overlay video to {output_path}")
+
+
 __all__ = [
     "add_egocentric_plot_args",
     "add_egocentric_video_args",
+    "add_landmark_overlay_video_args",
     "add_landmark_metric_plot_args",
     "add_landmark_traces_args",
     "run_egocentric_plot",
     "run_egocentric_video",
+    "run_landmark_overlay_video",
     "run_landmark_metric_plot",
     "run_landmark_traces",
 ]

@@ -12,7 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from mocopi.camera_projection import CameraProjectionResult
-from mocopi.visualization import CAMERA_EDGES
+from mocopi.visualization import CAMERA_EDGES, normalized_point_to_pixel
 
 
 DIAGNOSTIC_COLORS = [
@@ -75,13 +75,18 @@ def prepare_pose_landmarks_by_frame(
 def _draw_full_pose_skeleton(
     frame: np.ndarray,
     pose_landmarks: dict[str, tuple[float, float]],
+    *,
+    rotation_code: int | None,
 ) -> None:
-    h, w = frame.shape[:2]
     pts: dict[str, tuple[int, int]] = {}
     for name, (xn, yn) in pose_landmarks.items():
         if not np.isfinite(xn) or not np.isfinite(yn):
             continue
-        pts[name] = (int(xn * w), int(yn * h))
+        pts[name] = normalized_point_to_pixel(
+            frame.shape,
+            (float(xn), float(yn)),
+            rotation_code=rotation_code,
+        )
 
     for name_a, name_b in CAMERA_EDGES:
         if name_a in pts and name_b in pts:
@@ -316,24 +321,35 @@ def render_projection_overlay_video(
         if row_idx is not None:
             pose_landmarks = pose_landmarks_by_frame.get(frame_idx, {})
             if pose_landmarks:
-                _draw_full_pose_skeleton(frame, pose_landmarks)
+                _draw_full_pose_skeleton(frame, pose_landmarks, rotation_code=rotation_code)
 
             origin = result.origin_xy[row_idx]
             if result.space == "image" and np.all(np.isfinite(origin)):
-                ox = int(origin[0] * width)
-                oy = int(origin[1] * height)
+                ox, oy = normalized_point_to_pixel(
+                    frame.shape,
+                    (float(origin[0]), float(origin[1])),
+                    rotation_code=rotation_code,
+                )
                 cv2.circle(frame, (ox, oy), 6, (0, 220, 255), -1)
                 scale_norm = float(result.scale[row_idx]) if np.isfinite(result.scale[row_idx]) else 0.1
                 axis_scale = max(0.06, 0.9 * scale_norm)
                 x_axis = result.body_x_axis[row_idx]
                 y_axis = result.body_y_axis[row_idx]
-                x_tip = (
-                    int((origin[0] + x_axis[0] * axis_scale) * width),
-                    int((origin[1] + x_axis[1] * axis_scale) * height),
+                x_tip = normalized_point_to_pixel(
+                    frame.shape,
+                    (
+                        float(origin[0] + x_axis[0] * axis_scale),
+                        float(origin[1] + x_axis[1] * axis_scale),
+                    ),
+                    rotation_code=rotation_code,
                 )
-                y_tip = (
-                    int((origin[0] + y_axis[0] * axis_scale) * width),
-                    int((origin[1] + y_axis[1] * axis_scale) * height),
+                y_tip = normalized_point_to_pixel(
+                    frame.shape,
+                    (
+                        float(origin[0] + y_axis[0] * axis_scale),
+                        float(origin[1] + y_axis[1] * axis_scale),
+                    ),
+                    rotation_code=rotation_code,
                 )
                 cv2.arrowedLine(frame, (ox, oy), x_tip, (0, 64, 255), 3, tipLength=0.18)
                 cv2.arrowedLine(frame, (ox, oy), y_tip, (72, 214, 118), 3, tipLength=0.18)
@@ -342,8 +358,11 @@ def render_projection_overlay_video(
                 color = _color_for_index(landmark_idx)
                 raw_pt = pose_landmarks.get(landmark_name)
                 if raw_pt is not None and np.all(np.isfinite(raw_pt)):
-                    raw_cx = int(raw_pt[0] * width)
-                    raw_cy = int(raw_pt[1] * height)
+                    raw_cx, raw_cy = normalized_point_to_pixel(
+                        frame.shape,
+                        (float(raw_pt[0]), float(raw_pt[1])),
+                        rotation_code=rotation_code,
+                    )
                     used_in_projection = False
                     if landmark_name in result.valid_mask and row_idx < len(result.valid_mask[landmark_name]):
                         used_in_projection = bool(result.valid_mask[landmark_name][row_idx])
@@ -369,8 +388,11 @@ def render_projection_overlay_video(
                     continue
                 pt = result.image_points[landmark_name][row_idx]
                 if np.all(np.isfinite(pt)):
-                    cx = int(pt[0] * width)
-                    cy = int(pt[1] * height)
+                    cx, cy = normalized_point_to_pixel(
+                        frame.shape,
+                        (float(pt[0]), float(pt[1])),
+                        rotation_code=rotation_code,
+                    )
                     cv2.circle(frame, (cx, cy), 4, (255, 255, 255), -1)
 
             inset_w = max(280, int(0.33 * width))

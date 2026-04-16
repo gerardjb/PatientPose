@@ -34,7 +34,14 @@ def test_landmark_diagnostics_artifact_paths_are_stable():
         space="image",
         metric="thumb-index-distance",
     )
+    overlay_artifacts = store.landmark_overlay_diagnostics(
+        "fingertap",
+        source="hand",
+        space="image",
+        metric="thumb-index-distance",
+    )
 
     assert trace_artifacts.output_dir == root / "results" / "Diagnostics" / "landmarks"
     assert trace_artifacts.output_plot == root / "results" / "Diagnostics" / "landmarks" / "fingertap_hand_image_x_y_traces.png"
     assert metric_artifacts.output_plot == root / "results" / "Diagnostics" / "landmarks" / "fingertap_hand_image_thumb-index-distance.png"
+    assert overlay_artifacts.output_video == root / "results" / "Diagnostics" / "landmarks" / "fingertap_hand_image_thumb-index-distance_overlay.avi"

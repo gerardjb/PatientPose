@@ -84,12 +84,50 @@ def prepare_camera_landmarks(cam_df) -> Dict[int, Dict[str, Tuple[float, float]]
     return per_frame
 
 
-def draw_camera_skeleton(frame: np.ndarray, landmarks: Dict[str, Tuple[float, float]]) -> None:
-    h, w = frame.shape[:2]
+def rotate_normalized_point(
+    point: Tuple[float, float],
+    rotation_code: int | None,
+) -> Tuple[float, float]:
+    xn, yn = float(point[0]), float(point[1])
+    if rotation_code == cv2.ROTATE_90_CLOCKWISE:
+        xr, yr = 1.0 - yn, xn
+    elif rotation_code == cv2.ROTATE_90_COUNTERCLOCKWISE:
+        xr, yr = yn, 1.0 - xn
+    elif rotation_code == cv2.ROTATE_180:
+        xr, yr = 1.0 - xn, 1.0 - yn
+    else:
+        xr, yr = xn, yn
+    return float(np.clip(xr, 0.0, 1.0)), float(np.clip(yr, 0.0, 1.0))
+
+
+def normalized_point_to_pixel(
+    frame_shape: Tuple[int, ...],
+    point: Tuple[float, float],
+    *,
+    rotation_code: int | None = None,
+) -> Tuple[int, int]:
+    h, w = frame_shape[:2]
+    xr, yr = rotate_normalized_point(point, rotation_code)
+    cx = int(round(xr * max(w - 1, 0)))
+    cy = int(round(yr * max(h - 1, 0)))
+    return cx, cy
+
+
+def draw_camera_skeleton(
+    frame: np.ndarray,
+    landmarks: Dict[str, Tuple[float, float]],
+    *,
+    rotation_code: int | None = None,
+) -> None:
     pts: Dict[str, Tuple[int, int]] = {}
     for name, (xn, yn) in landmarks.items():
-        cx = int(xn * w)
-        cy = int(yn * h)
+        if not np.isfinite(xn) or not np.isfinite(yn):
+            continue
+        cx, cy = normalized_point_to_pixel(
+            frame.shape,
+            (float(xn), float(yn)),
+            rotation_code=rotation_code,
+        )
         pts[name] = (cx, cy)
     for a, b in CAMERA_EDGES:
         if a in pts and b in pts:
@@ -237,7 +275,9 @@ __all__ = [
     "CAMERA_EDGES",
     "MOCOPI_JOINTS",
     "MOCOPI_EDGES",
+    "normalized_point_to_pixel",
     "prepare_camera_landmarks",
+    "rotate_normalized_point",
     "draw_camera_skeleton",
     "prepare_mocopi_positions",
     "draw_mocopi_skeleton",

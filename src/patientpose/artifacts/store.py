@@ -70,6 +70,12 @@ class LandmarkMetricDiagnosticsArtifacts:
     output_plot: Path
 
 
+@dataclass(frozen=True)
+class LandmarkOverlayDiagnosticsArtifacts:
+    output_dir: Path
+    output_video: Path
+
+
 class ArtifactStore:
     def __init__(self, paths: ProjectPaths) -> None:
         self.paths = paths
@@ -175,4 +181,18 @@ class ArtifactStore:
         return LandmarkMetricDiagnosticsArtifacts(
             output_dir=output_dir,
             output_plot=output_dir / f"{stem}_{source}_{space}_{metric}.png",
+        )
+
+    def landmark_overlay_diagnostics(
+        self,
+        stem: str,
+        *,
+        source: str,
+        space: str,
+        metric: str,
+    ) -> LandmarkOverlayDiagnosticsArtifacts:
+        output_dir = self.paths.results / "Diagnostics" / "landmarks"
+        return LandmarkOverlayDiagnosticsArtifacts(
+            output_dir=output_dir,
+            output_video=output_dir / f"{stem}_{source}_{space}_{metric}_overlay.avi",
         )

@@ -11,10 +11,12 @@ from patientpose.pipeline.analyze import (
 from patientpose.pipeline.diagnostics import (
     add_egocentric_plot_args,
     add_egocentric_video_args,
+    add_landmark_overlay_video_args,
     add_landmark_metric_plot_args,
     add_landmark_traces_args,
     run_egocentric_plot,
     run_egocentric_video,
+    run_landmark_overlay_video,
     run_landmark_metric_plot,
     run_landmark_traces,
 )
@@ -155,6 +157,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_landmark_metric_plot_args(diagnose_landmark_metric_parser)
     diagnose_landmark_metric_parser.set_defaults(handler=run_landmark_metric_plot)
+
+    diagnose_landmark_overlay_parser = diagnose_subparsers.add_parser(
+        "landmark-overlay-video",
+        help="Render a video overlay with selected landmarks and a rolling derived-metric trace.",
+    )
+    add_landmark_overlay_video_args(diagnose_landmark_overlay_parser)
+    diagnose_landmark_overlay_parser.set_defaults(handler=run_landmark_overlay_video)
 
     return parser
 

@@ -975,7 +975,7 @@ def run_side_by_side(args: argparse.Namespace) -> None:
         left = frame.copy()
         cam_landmarks = camera_by_frame.get(frame_idx)
         if cam_landmarks and draw_left_overlay:
-            draw_camera_skeleton(left, cam_landmarks)
+            draw_camera_skeleton(left, cam_landmarks, rotation_code=video_rotation_code)
 
         t_cam_ms = _timestamp_for_frame(cam_df, frame_idx, cam_landmarks, fps)
         t_mocopi_ms = t_cam_ms + offset_ms
@@ -1259,9 +1259,9 @@ def run_triplet_video(args: argparse.Namespace) -> None:
             lms_a = a_landmarks.get(int(a_frame_idx))
             lms_nd = nd_landmarks.get(int(nd_frame_idx))
             if lms_a and draw_overlay_a:
-                draw_camera_skeleton(left, lms_a)
+                draw_camera_skeleton(left, lms_a, rotation_code=a_rotation_code)
             if lms_nd and draw_overlay_nd:
-                draw_camera_skeleton(middle, lms_nd)
+                draw_camera_skeleton(middle, lms_nd, rotation_code=nd_rotation_code)
 
             t_a_ms = float(a_frame_timestamps_ms[a_frame_idx])
 
