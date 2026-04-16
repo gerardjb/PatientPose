@@ -361,10 +361,6 @@ def _normalize_components(components: list[str] | None, *, default: list[str]) -
     return normalized
 
 
-def _default_landmark_diagnostics_output(paths, stem: str, suffix: str) -> Path:
-    return (paths.results / "Diagnostics" / "landmarks" / f"{stem}_{suffix}.png").resolve()
-
-
 def _apply_quality_threshold_and_smoothing(
     series_df: pd.DataFrame,
     *,
@@ -597,6 +593,8 @@ def run_egocentric_video(args: argparse.Namespace) -> None:
 
 def run_landmark_traces(args: argparse.Namespace) -> None:
     paths = resolve_project_paths(args.project_root)
+    artifact_store = ArtifactStore(paths)
+    artifact_store.ensure_standard_dirs()
     camera_csv_path, _, _ = _resolve_camera_inputs(
         project_root=paths.root,
         camera_csv=args.camera_csv,
@@ -624,11 +622,12 @@ def run_landmark_traces(args: argparse.Namespace) -> None:
     output_path = (
         _resolve_cli_path(args.output, paths.root)
         if args.output is not None
-        else _default_landmark_diagnostics_output(
-            paths,
+        else artifact_store.landmark_trace_diagnostics(
             stem,
-            f"{args.source}_{args.space}_{'_'.join(components)}_traces",
-        )
+            source=args.source,
+            space=args.space,
+            components=tuple(components),
+        ).output_plot
     )
     plot_landmark_components(
         series_map,
@@ -641,6 +640,8 @@ def run_landmark_traces(args: argparse.Namespace) -> None:
 
 def run_landmark_metric_plot(args: argparse.Namespace) -> None:
     paths = resolve_project_paths(args.project_root)
+    artifact_store = ArtifactStore(paths)
+    artifact_store.ensure_standard_dirs()
     camera_csv_path, _, _ = _resolve_camera_inputs(
         project_root=paths.root,
         camera_csv=args.camera_csv,
@@ -675,11 +676,12 @@ def run_landmark_metric_plot(args: argparse.Namespace) -> None:
     output_path = (
         _resolve_cli_path(args.output, paths.root)
         if args.output is not None
-        else _default_landmark_diagnostics_output(
-            paths,
+        else artifact_store.landmark_metric_diagnostics(
             stem,
-            f"{args.source}_{args.space}_{args.metric}",
-        )
+            source=args.source,
+            space=args.space,
+            metric=args.metric,
+        ).output_plot
     )
     plot_metric_trace(
         [TraceSpec(label=label, df=metric_df)],

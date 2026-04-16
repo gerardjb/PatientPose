@@ -286,6 +286,40 @@ Diagnostics outputs default to:
 - `results/Diagnostics/egocentric/<stem>_<space>_<frame-mode>_components.pdf`
 - `results/Diagnostics/egocentric/<stem>_<space>_<frame-mode>_overlay.avi`
 
+### Generic landmark traces and metrics
+
+Use these when you want direct plots from `landmarks_*.csv` without going through the Mocopi projection stack.
+
+Raw landmark components:
+
+```bash
+patientpose diagnose landmark-traces \
+  --camera_csv results/OutputCSVs/landmarks_20250408_fingerTap_decrement.csv \
+  --source hand \
+  --handedness Right \
+  --landmarks THUMB_TIP INDEX_FINGER_TIP \
+  --components x y
+```
+
+Derived metric traces:
+
+```bash
+patientpose diagnose landmark-metric-plot \
+  --camera_csv results/OutputCSVs/landmarks_20250408_fingerTap_decrement.csv \
+  --source hand \
+  --handedness Right \
+  --metric thumb-index-distance
+```
+
+Useful options:
+- `--quality-threshold`
+- `--smooth-window N`
+- `--metric distance|delta|centroid-distance|angle|thumb-index-distance|pinch-velocity`
+
+Default outputs live under:
+- `results/Diagnostics/landmarks/<stem>_<source>_<space>_<components>_traces.png`
+- `results/Diagnostics/landmarks/<stem>_<source>_<space>_<metric>.png`
+
 ## Image space vs world space
 
 Use image-space pose when the task needs to line up with pixels:

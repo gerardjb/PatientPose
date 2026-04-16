@@ -58,6 +58,18 @@ class EgocentricDiagnosticsArtifacts:
     overlay_video: Path
 
 
+@dataclass(frozen=True)
+class LandmarkTraceDiagnosticsArtifacts:
+    output_dir: Path
+    output_plot: Path
+
+
+@dataclass(frozen=True)
+class LandmarkMetricDiagnosticsArtifacts:
+    output_dir: Path
+    output_plot: Path
+
+
 class ArtifactStore:
     def __init__(self, paths: ProjectPaths) -> None:
         self.paths = paths
@@ -67,6 +79,8 @@ class ArtifactStore:
         self.paths.output_csvs.mkdir(parents=True, exist_ok=True)
         self.paths.output_plots.mkdir(parents=True, exist_ok=True)
         self.paths.orientation_debug.mkdir(parents=True, exist_ok=True)
+        (self.paths.results / "Diagnostics" / "egocentric").mkdir(parents=True, exist_ok=True)
+        (self.paths.results / "Diagnostics" / "landmarks").mkdir(parents=True, exist_ok=True)
 
     def preprocess_video(self, video_path: Path) -> PreprocessVideoArtifacts:
         stem = video_path.stem
@@ -132,4 +146,33 @@ class ArtifactStore:
             output_dir=output_dir,
             components_plot=output_dir / f"{stem}_{space}_{frame_mode}_components.pdf",
             overlay_video=output_dir / f"{stem}_{space}_{frame_mode}_overlay.avi",
+        )
+
+    def landmark_trace_diagnostics(
+        self,
+        stem: str,
+        *,
+        source: str,
+        space: str,
+        components: tuple[str, ...],
+    ) -> LandmarkTraceDiagnosticsArtifacts:
+        output_dir = self.paths.results / "Diagnostics" / "landmarks"
+        component_label = "_".join(components)
+        return LandmarkTraceDiagnosticsArtifacts(
+            output_dir=output_dir,
+            output_plot=output_dir / f"{stem}_{source}_{space}_{component_label}_traces.png",
+        )
+
+    def landmark_metric_diagnostics(
+        self,
+        stem: str,
+        *,
+        source: str,
+        space: str,
+        metric: str,
+    ) -> LandmarkMetricDiagnosticsArtifacts:
+        output_dir = self.paths.results / "Diagnostics" / "landmarks"
+        return LandmarkMetricDiagnosticsArtifacts(
+            output_dir=output_dir,
+            output_plot=output_dir / f"{stem}_{source}_{space}_{metric}.png",
         )

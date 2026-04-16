@@ -94,6 +94,26 @@ python sample_patient_processing.py --filename "your_file.extension"
     --output results/mocopi_camera_reliability_ND_1a.csv
   ```
   The exported CSV (`time_s`, `joint`, `landmark`, `error_2d`, and the egocentric displacements) is meant for downstream guard-rail analysis. Offsets are estimated automatically unless you provide `--offset_ms`.
+- Generic landmark diagnostics are now available through the packaged `patientpose diagnose` surface.
+```bash
+python -m patientpose diagnose landmark-traces \
+  --camera_csv results/OutputCSVs/landmarks_20250408_fingerTap_decrement.csv \
+  --source hand \
+  --handedness Right \
+  --landmarks THUMB_TIP INDEX_FINGER_TIP \
+  --components x y
+```
+```bash
+python -m patientpose diagnose landmark-metric-plot \
+  --camera_csv results/OutputCSVs/landmarks_20250408_fingerTap_decrement.csv \
+  --source hand \
+  --handedness Right \
+  --metric thumb-index-distance
+```
+  * Default outputs land under `results/Diagnostics/landmarks/`.
+  * `landmark-traces` plots raw landmark components over time.
+  * `landmark-metric-plot` plots derived metrics such as pairwise distance, delta, centroid distance, angle, thumb-index distance, and pinch velocity.
+  * For camera CSVs with `quality_score`, `--quality-threshold` can blank low-quality samples before plotting.
 - A labeling GUI for batching metadata entry lives at `scripts/video_labeling_gui.py`. It relies on the community-maintained `FreeSimpleGUI` package bundled with the project dependencies. Launch it from the `scripts` directory with:
 ```bash
 python video_labeling_gui.py
