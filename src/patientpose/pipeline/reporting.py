@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from glob import glob
 from pathlib import Path
 
 import matplotlib
@@ -22,6 +23,7 @@ from patientpose.artifacts import ArtifactStore, PairReportArtifacts
 from patientpose.config import resolve_project_paths
 from patientpose.datasets import discover_pairs, discover_sessions, infer_camera_csv, parse_camera_role_specs
 from patientpose.landmarks import infer_pose_world_csv
+from patientpose.reporting import compute_landmark_metric_trace, export_landmark_metric_batch, metric_trace_table, summarize_landmark_metric_trace
 
 
 def add_pair_report_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -68,6 +70,180 @@ def add_pair_report_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     return parser
 
 
+LANDMARK_METRIC_CHOICES = (
+    "distance",
+    "delta",
+    "centroid-distance",
+    "angle",
+    "thumb-index-distance",
+    "pinch-velocity",
+)
+
+
+def _resolve_cli_path(path: Path, project_root: Path) -> Path:
+    return path if path.is_absolute() else (project_root / path).resolve()
+
+
+def _add_landmark_metric_option_args(
+    parser: argparse.ArgumentParser,
+    *,
+    include_world_csv: bool,
+) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--source",
+        choices=("hand", "pose"),
+        default="hand",
+        help="Landmark source to extract from the CSV.",
+    )
+    parser.add_argument(
+        "--space",
+        choices=("image", "world"),
+        default="image",
+        help="Which landmark representation to analyze.",
+    )
+    if include_world_csv:
+        parser.add_argument(
+            "--world_csv",
+            type=Path,
+            default=None,
+            help="Optional explicit path to the pose-world CSV. Defaults to the paired preprocess artifact.",
+        )
+    parser.add_argument(
+        "--handedness",
+        type=str,
+        default=None,
+        help="Optional handedness filter, e.g. Right or Left.",
+    )
+    parser.add_argument(
+        "--instance-id",
+        type=int,
+        default=None,
+        help="Optional instance id filter for multi-instance landmark sources.",
+    )
+    parser.add_argument(
+        "--landmarks",
+        nargs="+",
+        default=None,
+        help="Landmark names or ids to extract.",
+    )
+    parser.add_argument(
+        "--components",
+        nargs="+",
+        default=None,
+        help="Components to use. Choose from x y z.",
+    )
+    parser.add_argument(
+        "--smooth-window",
+        type=int,
+        default=1,
+        help="Centered rolling smoothing window in frames.",
+    )
+    parser.add_argument(
+        "--quality-threshold",
+        type=float,
+        default=None,
+        help="Optional minimum quality_score. Samples below it are set to NaN before metric computation.",
+    )
+    parser.add_argument(
+        "--metric",
+        choices=LANDMARK_METRIC_CHOICES,
+        default="distance",
+        help="Derived metric to export.",
+    )
+    parser.add_argument(
+        "--delta-component",
+        choices=("x", "y", "z"),
+        default=None,
+        help="Component to use for the delta metric. Defaults to the first component in --components.",
+    )
+    return parser
+
+
+def add_landmark_metric_export_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="PatientPose repo root. Defaults to the nearest parent containing pyproject.toml.",
+    )
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
+        "--camera_csv",
+        type=Path,
+        default=None,
+        help="Direct path to the camera landmarks CSV to export.",
+    )
+    source_group.add_argument(
+        "--tag",
+        type=str,
+        default=None,
+        help="Resolved pair tag to export from.",
+    )
+    parser.add_argument(
+        "--camera-side",
+        choices=("A", "ND"),
+        default="ND",
+        help="Which camera side to use when resolving from --tag.",
+    )
+    parser.add_argument(
+        "--camera-role",
+        action="append",
+        default=None,
+        help="Session-mode camera mapping in the form CAMERA_ID=ROLE, where ROLE is A or ND.",
+    )
+    _add_landmark_metric_option_args(parser, include_world_csv=True)
+    parser.add_argument(
+        "--trace-output",
+        type=Path,
+        default=None,
+        help="Optional explicit output path for the long-form metric trace CSV.",
+    )
+    parser.add_argument(
+        "--summary-output",
+        type=Path,
+        default=None,
+        help="Optional explicit output path for the summary CSV.",
+    )
+    return parser
+
+
+def add_landmark_metric_batch_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="PatientPose repo root. Defaults to the nearest parent containing pyproject.toml.",
+    )
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
+        "--camera-csvs",
+        nargs="+",
+        type=Path,
+        default=None,
+        help="Explicit list of camera landmark CSVs to batch export.",
+    )
+    source_group.add_argument(
+        "--glob",
+        type=str,
+        default=None,
+        help="Glob pattern, relative to --project-root, for camera landmark CSVs to batch export.",
+    )
+    _add_landmark_metric_option_args(parser, include_world_csv=False)
+    parser.add_argument(
+        "--trace-output",
+        type=Path,
+        default=None,
+        help="Optional explicit output path for the batch long-form metric trace CSV.",
+    )
+    parser.add_argument(
+        "--summary-output",
+        type=Path,
+        default=None,
+        help="Optional explicit output path for the batch summary CSV.",
+    )
+    return parser
+
+
 def build_pair_report_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Per-pair reliability plots and ND-A delta summary.")
     return add_pair_report_args(parser)
@@ -75,6 +251,48 @@ def build_pair_report_parser() -> argparse.ArgumentParser:
 
 def _camera_csv_for_video(video_path: Path, project_root: Path) -> Path:
     return (project_root / infer_camera_csv(video_path)).resolve()
+
+
+def _resolve_landmark_metric_camera_csv(
+    *,
+    project_root: Path,
+    camera_csv: Path | None,
+    tag: str | None,
+    camera_side: str,
+    camera_role_specs: list[str] | None,
+) -> Path:
+    if camera_csv is not None:
+        return _resolve_cli_path(camera_csv, project_root)
+
+    camera_roles = parse_camera_role_specs(camera_role_specs)
+    pairs = discover_pairs(project_root, camera_roles=camera_roles)
+    pair = next((candidate for candidate in pairs if candidate.tag == tag), None)
+    if pair is None:
+        sessions = discover_sessions(project_root)
+        hint = ""
+        if sessions and not camera_roles:
+            hint = " Add --camera-role CAMERA_ID=A and --camera-role CAMERA_ID=ND for session data."
+        raise SystemExit(f"Tag '{tag}' not found in discovered Mocopi/camera pairs.{hint}")
+
+    video_path = pair.unfiltered_video if camera_side == "A" else pair.nd_video
+    return _camera_csv_for_video(video_path, project_root)
+
+
+def _resolve_batch_camera_csvs(
+    *,
+    project_root: Path,
+    camera_csvs: list[Path] | None,
+    pattern: str | None,
+) -> list[Path]:
+    resolved: list[Path] = []
+    if camera_csvs:
+        resolved = [_resolve_cli_path(path, project_root) for path in camera_csvs]
+    elif pattern:
+        resolved = sorted(Path(match).resolve() for match in glob(str(project_root / pattern), recursive=True))
+    files = [path for path in resolved if path.is_file()]
+    if not files:
+        raise SystemExit("No landmark CSVs matched the requested batch inputs.")
+    return files
 
 
 def _pair_plot_path(artifacts: PairReportArtifacts, tag: str, joint: str) -> Path:
@@ -155,6 +373,105 @@ def plot_pair(
     fig.savefig(out_path)
     plt.close(fig)
     print(f"[{tag}] Saved pair plot to {out_path}")
+
+
+def run_landmark_metric_export(args: argparse.Namespace) -> None:
+    paths = resolve_project_paths(args.project_root)
+    artifact_store = ArtifactStore(paths)
+    artifact_store.ensure_standard_dirs()
+
+    camera_csv_path = _resolve_landmark_metric_camera_csv(
+        project_root=paths.root,
+        camera_csv=args.camera_csv,
+        tag=args.tag,
+        camera_side=args.camera_side,
+        camera_role_specs=args.camera_role,
+    )
+    try:
+        result = compute_landmark_metric_trace(
+            camera_csv_path,
+            metric=args.metric,
+            source=args.source,
+            space=args.space,
+            project_root=paths.root,
+            world_csv=_resolve_cli_path(args.world_csv, paths.root) if args.world_csv is not None else None,
+            handedness=args.handedness,
+            instance_id=args.instance_id,
+            landmarks=args.landmarks,
+            components=args.components,
+            delta_component=args.delta_component,
+            quality_threshold=args.quality_threshold,
+            smooth_window=args.smooth_window,
+        )
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    artifacts = artifact_store.landmark_metric_report(
+        result.stem,
+        source=args.source,
+        space=args.space,
+        metric=args.metric,
+    )
+    trace_output = _resolve_cli_path(args.trace_output, paths.root) if args.trace_output is not None else artifacts.trace_csv
+    summary_output = (
+        _resolve_cli_path(args.summary_output, paths.root) if args.summary_output is not None else artifacts.summary_csv
+    )
+
+    trace_df = metric_trace_table(result)
+    summary_df = summarize_landmark_metric_trace(result)
+
+    trace_output.parent.mkdir(parents=True, exist_ok=True)
+    summary_output.parent.mkdir(parents=True, exist_ok=True)
+    trace_df.to_csv(trace_output, index=False)
+    summary_df.to_csv(summary_output, index=False)
+    print(f"Wrote landmark metric trace CSV to {trace_output}")
+    print(f"Wrote landmark metric summary CSV to {summary_output}")
+
+
+def run_landmark_metric_batch(args: argparse.Namespace) -> None:
+    paths = resolve_project_paths(args.project_root)
+    artifact_store = ArtifactStore(paths)
+    artifact_store.ensure_standard_dirs()
+
+    camera_csvs = _resolve_batch_camera_csvs(
+        project_root=paths.root,
+        camera_csvs=args.camera_csvs,
+        pattern=args.glob,
+    )
+    try:
+        trace_df, summary_df = export_landmark_metric_batch(
+            camera_csvs,
+            metric=args.metric,
+            source=args.source,
+            space=args.space,
+            project_root=paths.root,
+            handedness=args.handedness,
+            instance_id=args.instance_id,
+            landmarks=args.landmarks,
+            components=args.components,
+            delta_component=args.delta_component,
+            quality_threshold=args.quality_threshold,
+            smooth_window=args.smooth_window,
+        )
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    artifacts = artifact_store.landmark_metric_batch_report(
+        source=args.source,
+        space=args.space,
+        metric=args.metric,
+    )
+    trace_output = _resolve_cli_path(args.trace_output, paths.root) if args.trace_output is not None else artifacts.trace_csv
+    summary_output = (
+        _resolve_cli_path(args.summary_output, paths.root) if args.summary_output is not None else artifacts.summary_csv
+    )
+
+    trace_output.parent.mkdir(parents=True, exist_ok=True)
+    summary_output.parent.mkdir(parents=True, exist_ok=True)
+    trace_df.to_csv(trace_output, index=False)
+    summary_df.to_csv(summary_output, index=False)
+    print(f"Wrote batch landmark metric trace CSV to {trace_output}")
+    print(f"Wrote batch landmark metric summary CSV to {summary_output}")
 
 
 def run_pair_report(args: argparse.Namespace) -> None:

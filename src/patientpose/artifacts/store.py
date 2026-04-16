@@ -76,6 +76,13 @@ class LandmarkOverlayDiagnosticsArtifacts:
     output_video: Path
 
 
+@dataclass(frozen=True)
+class LandmarkMetricReportArtifacts:
+    output_dir: Path
+    trace_csv: Path
+    summary_csv: Path
+
+
 class ArtifactStore:
     def __init__(self, paths: ProjectPaths) -> None:
         self.paths = paths
@@ -87,6 +94,7 @@ class ArtifactStore:
         self.paths.orientation_debug.mkdir(parents=True, exist_ok=True)
         (self.paths.results / "Diagnostics" / "egocentric").mkdir(parents=True, exist_ok=True)
         (self.paths.results / "Diagnostics" / "landmarks").mkdir(parents=True, exist_ok=True)
+        (self.paths.results / "Reports" / "landmark_metrics").mkdir(parents=True, exist_ok=True)
 
     def preprocess_video(self, video_path: Path) -> PreprocessVideoArtifacts:
         stem = video_path.stem
@@ -195,4 +203,35 @@ class ArtifactStore:
         return LandmarkOverlayDiagnosticsArtifacts(
             output_dir=output_dir,
             output_video=output_dir / f"{stem}_{source}_{space}_{metric}_overlay.avi",
+        )
+
+    def landmark_metric_report(
+        self,
+        stem: str,
+        *,
+        source: str,
+        space: str,
+        metric: str,
+    ) -> LandmarkMetricReportArtifacts:
+        output_dir = self.paths.results / "Reports" / "landmark_metrics"
+        base = f"{stem}_{source}_{space}_{metric}"
+        return LandmarkMetricReportArtifacts(
+            output_dir=output_dir,
+            trace_csv=output_dir / f"{base}_trace.csv",
+            summary_csv=output_dir / f"{base}_summary.csv",
+        )
+
+    def landmark_metric_batch_report(
+        self,
+        *,
+        source: str,
+        space: str,
+        metric: str,
+    ) -> LandmarkMetricReportArtifacts:
+        output_dir = self.paths.results / "Reports" / "landmark_metrics"
+        base = f"batch_{source}_{space}_{metric}"
+        return LandmarkMetricReportArtifacts(
+            output_dir=output_dir,
+            trace_csv=output_dir / f"{base}_traces.csv",
+            summary_csv=output_dir / f"{base}_summary.csv",
         )

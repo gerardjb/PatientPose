@@ -34,7 +34,14 @@ from patientpose.pipeline.rendering import (
     run_side_by_side,
     run_triplet_video,
 )
-from patientpose.pipeline.reporting import add_pair_report_args, run_pair_report
+from patientpose.pipeline.reporting import (
+    add_landmark_metric_batch_args,
+    add_landmark_metric_export_args,
+    add_pair_report_args,
+    run_landmark_metric_batch,
+    run_landmark_metric_export,
+    run_pair_report,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,6 +103,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_pair_report_args(report_pair_parser)
     report_pair_parser.set_defaults(handler=run_pair_report)
+
+    report_landmark_export_parser = report_subparsers.add_parser(
+        "landmark-metric-export",
+        help="Export structured landmark metric trace and summary CSVs for one camera CSV.",
+    )
+    add_landmark_metric_export_args(report_landmark_export_parser)
+    report_landmark_export_parser.set_defaults(handler=run_landmark_metric_export)
+
+    report_landmark_batch_parser = report_subparsers.add_parser(
+        "landmark-metric-batch",
+        help="Batch export structured landmark metric trace and summary CSVs.",
+    )
+    add_landmark_metric_batch_args(report_landmark_batch_parser)
+    report_landmark_batch_parser.set_defaults(handler=run_landmark_metric_batch)
 
     render_parser = subparsers.add_parser(
         "render",

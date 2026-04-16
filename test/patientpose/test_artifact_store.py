@@ -40,8 +40,23 @@ def test_landmark_diagnostics_artifact_paths_are_stable():
         space="image",
         metric="thumb-index-distance",
     )
+    report_artifacts = store.landmark_metric_report(
+        "fingertap",
+        source="hand",
+        space="image",
+        metric="thumb-index-distance",
+    )
+    batch_report_artifacts = store.landmark_metric_batch_report(
+        source="hand",
+        space="image",
+        metric="thumb-index-distance",
+    )
 
     assert trace_artifacts.output_dir == root / "results" / "Diagnostics" / "landmarks"
     assert trace_artifacts.output_plot == root / "results" / "Diagnostics" / "landmarks" / "fingertap_hand_image_x_y_traces.png"
     assert metric_artifacts.output_plot == root / "results" / "Diagnostics" / "landmarks" / "fingertap_hand_image_thumb-index-distance.png"
     assert overlay_artifacts.output_video == root / "results" / "Diagnostics" / "landmarks" / "fingertap_hand_image_thumb-index-distance_overlay.avi"
+    assert report_artifacts.trace_csv == root / "results" / "Reports" / "landmark_metrics" / "fingertap_hand_image_thumb-index-distance_trace.csv"
+    assert report_artifacts.summary_csv == root / "results" / "Reports" / "landmark_metrics" / "fingertap_hand_image_thumb-index-distance_summary.csv"
+    assert batch_report_artifacts.trace_csv == root / "results" / "Reports" / "landmark_metrics" / "batch_hand_image_thumb-index-distance_traces.csv"
+    assert batch_report_artifacts.summary_csv == root / "results" / "Reports" / "landmark_metrics" / "batch_hand_image_thumb-index-distance_summary.csv"
