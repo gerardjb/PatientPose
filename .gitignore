@@ -58,3 +58,6 @@ Thumbs.db
 
 # dropped cores, just in case
 core*
+
+# docs for scoped stages of refactorings and the like
+docs/
