@@ -19,14 +19,8 @@ from patientpose.diagnostics import (
     render_projection_overlay_video,
 )
 from patientpose.landmarks import build_multi_landmark_series, landmark_stem_from_image_csv, load_landmark_views
-from patientpose.metrics import (
-    centroid,
-    pairwise_delta,
-    pairwise_distance,
-    pinch_velocity,
-    point_to_centroid_distance,
-    segment_angle,
-    thumb_index_distance,
+from patientpose.reporting import (
+    compute_landmark_metric_trace,
 )
 from patientpose.pipeline.rendering import (
     _resolve_camera_panel_video,
@@ -481,68 +475,6 @@ def _build_landmark_series_map(
     }
 
 
-def _resolve_metric_landmarks(metric: str, landmarks: list[str] | None) -> list[str]:
-    if landmarks:
-        return landmarks
-    if metric in {"thumb-index-distance", "pinch-velocity"}:
-        return ["THUMB_TIP", "INDEX_FINGER_TIP"]
-    raise SystemExit(f"--landmarks is required for metric '{metric}'.")
-
-
-def _compute_metric_trace(
-    *,
-    metric: str,
-    series_map: dict[str, pd.DataFrame],
-    components: list[str],
-    delta_component: str | None,
-) -> tuple[pd.DataFrame, str]:
-    names = list(series_map.keys())
-    if metric == "distance":
-        if len(names) != 2:
-            raise SystemExit("Metric 'distance' requires exactly 2 landmarks.")
-        metric_df = pairwise_distance(series_map[names[0]], series_map[names[1]], components=components)
-        return metric_df, f"{names[0]} vs {names[1]} distance"
-    if metric == "delta":
-        if len(names) != 2:
-            raise SystemExit("Metric 'delta' requires exactly 2 landmarks.")
-        component = delta_component or components[0]
-        metric_df = pairwise_delta(series_map[names[0]], series_map[names[1]], component=component)
-        return metric_df, f"{names[0]} - {names[1]} ({component})"
-    if metric == "centroid-distance":
-        if len(names) < 2:
-            raise SystemExit("Metric 'centroid-distance' requires at least 2 landmarks.")
-        point_name = names[0]
-        centroid_df = centroid([series_map[name] for name in names[1:]], components=components)
-        metric_df = point_to_centroid_distance(
-            series_map[point_name],
-            centroid_df,
-            components=components,
-        )
-        return metric_df, f"{point_name} to centroid({', '.join(names[1:])})"
-    if metric == "angle":
-        if len(names) != 4:
-            raise SystemExit("Metric 'angle' requires exactly 4 landmarks.")
-        metric_df = segment_angle(
-            series_map[names[0]],
-            series_map[names[1]],
-            series_map[names[2]],
-            series_map[names[3]],
-            components=components,
-        )
-        return metric_df, f"angle({names[0]}-{names[1]}, {names[2]}-{names[3]})"
-    if metric == "thumb-index-distance":
-        if len(names) != 2:
-            raise SystemExit("Metric 'thumb-index-distance' requires exactly 2 landmarks.")
-        metric_df = thumb_index_distance(series_map[names[0]], series_map[names[1]], components=tuple(components))
-        return metric_df, "thumb-index distance"
-    if metric == "pinch-velocity":
-        if len(names) != 2:
-            raise SystemExit("Metric 'pinch-velocity' requires exactly 2 landmarks.")
-        metric_df = pinch_velocity(series_map[names[0]], series_map[names[1]], components=tuple(components))
-        return metric_df, "pinch velocity"
-    raise SystemExit(f"Unsupported metric '{metric}'.")
-
-
 def run_egocentric_plot(args: argparse.Namespace) -> None:
     paths = resolve_project_paths(args.project_root)
     artifact_store = ArtifactStore(paths)
@@ -717,45 +649,39 @@ def run_landmark_metric_plot(args: argparse.Namespace) -> None:
         camera_side=args.camera_side,
         camera_role_specs=args.camera_role,
     )
-    df, stem = _resolve_landmark_df(
-        paths=paths,
-        camera_csv_path=camera_csv_path,
-        space=args.space,
-        world_csv=args.world_csv,
-    )
-    components = _normalize_components(args.components, default=["x", "y"])
-    landmarks = _resolve_metric_landmarks(args.metric, args.landmarks)
-    series_map = _build_landmark_series_map(
-        df,
-        landmarks=landmarks,
-        source=args.source,
-        handedness=args.handedness,
-        instance_id=args.instance_id,
-        components=components,
-        quality_threshold=args.quality_threshold,
-        smooth_window=args.smooth_window,
-    )
-    metric_df, label = _compute_metric_trace(
-        metric=args.metric,
-        series_map=series_map,
-        components=components,
-        delta_component=args.delta_component,
-    )
+    try:
+        result = compute_landmark_metric_trace(
+            camera_csv_path,
+            metric=args.metric,
+            source=args.source,
+            space=args.space,
+            project_root=paths.root,
+            world_csv=_resolve_cli_path(args.world_csv, paths.root) if args.world_csv is not None else None,
+            handedness=args.handedness,
+            instance_id=args.instance_id,
+            landmarks=args.landmarks,
+            components=args.components,
+            delta_component=args.delta_component,
+            quality_threshold=args.quality_threshold,
+            smooth_window=args.smooth_window,
+        )
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
     output_path = (
         _resolve_cli_path(args.output, paths.root)
         if args.output is not None
         else artifact_store.landmark_metric_diagnostics(
-            stem,
+            result.stem,
             source=args.source,
             space=args.space,
             metric=args.metric,
         ).output_plot
     )
     plot_metric_trace(
-        [TraceSpec(label=label, df=metric_df)],
+        [TraceSpec(label=result.metric_label, df=result.metric_df)],
         output_path,
-        title=f"Landmark metric: {stem} ({args.metric})",
-        y_label=metric_df["metric"].iloc[0] if not metric_df.empty else args.metric,
+        title=f"Landmark metric: {result.stem} ({args.metric})",
+        y_label=result.metric_df["metric"].iloc[0] if not result.metric_df.empty else args.metric,
     )
     print(f"Saved landmark metric plot to {output_path}")
 
@@ -790,33 +716,35 @@ def run_landmark_overlay_video(args: argparse.Namespace) -> None:
         args.orientation_max_scan,
     )
 
+    try:
+        result = compute_landmark_metric_trace(
+            camera_csv_path,
+            metric=args.metric,
+            source=args.source,
+            space=args.space,
+            project_root=paths.root,
+            world_csv=_resolve_cli_path(args.world_csv, paths.root) if args.world_csv is not None else None,
+            handedness=args.handedness,
+            instance_id=args.instance_id,
+            landmarks=args.landmarks,
+            components=args.components,
+            delta_component=args.delta_component,
+            quality_threshold=args.quality_threshold,
+            smooth_window=args.smooth_window,
+        )
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
     landmark_views = load_landmark_views(
         camera_csv_path,
         project_root=paths.root,
         world_csv=_resolve_cli_path(args.world_csv, paths.root) if args.world_csv is not None else None,
         require_world=args.space == "world",
     )
-    metric_df_source = landmark_views.world_df if args.space == "world" else landmark_views.image_df
-    if metric_df_source is None:
-        raise SystemExit(f"No {args.space}-space landmark data available for {camera_csv_path}.")
     image_df = landmark_views.image_df
-    stem = landmark_stem_from_image_csv(camera_csv_path)
-    components = _normalize_components(args.components, default=["x", "y"])
-    landmarks = _resolve_metric_landmarks(args.metric, args.landmarks)
-
-    computation_series_map = _build_landmark_series_map(
-        metric_df_source,
-        landmarks=landmarks,
-        source=args.source,
-        handedness=args.handedness,
-        instance_id=args.instance_id,
-        components=components,
-        quality_threshold=args.quality_threshold,
-        smooth_window=args.smooth_window,
-    )
     overlay_series_map = _build_landmark_series_map(
         image_df,
-        landmarks=landmarks,
+        landmarks=list(result.landmarks),
         source=args.source,
         handedness=args.handedness,
         instance_id=args.instance_id,
@@ -824,18 +752,12 @@ def run_landmark_overlay_video(args: argparse.Namespace) -> None:
         quality_threshold=args.quality_threshold,
         smooth_window=1,
     )
-    metric_df, label = _compute_metric_trace(
-        metric=args.metric,
-        series_map=computation_series_map,
-        components=components,
-        delta_component=args.delta_component,
-    )
 
     output_path = (
         _resolve_cli_path(args.output, paths.root)
         if args.output is not None
         else artifact_store.landmark_overlay_diagnostics(
-            stem,
+            result.stem,
             source=args.source,
             space=args.space,
             metric=args.metric,
@@ -849,12 +771,12 @@ def run_landmark_overlay_video(args: argparse.Namespace) -> None:
     render_landmark_overlay_video(
         video_path=video_path,
         landmark_series_map=overlay_series_map,
-        metric_df=metric_df,
-        metric_label=label,
+        metric_df=result.metric_df,
+        metric_label=result.metric_label,
         output_path=output_path,
         rotation_code=rotation_code,
         max_frames=args.max_frames,
-        title=f"Landmark overlay: {stem}",
+        title=f"Landmark overlay: {result.stem}",
         overlay_label=f"{args.source} | {args.space} | {panel_source} | {rotation_source}",
         trace_window_seconds=args.trace_window_seconds,
         pose_landmarks_by_frame=pose_landmarks_by_frame,
