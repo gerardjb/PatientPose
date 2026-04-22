@@ -2,6 +2,7 @@
 
 from .store import (
     ArtifactStore,
+    BodyAngleReportArtifacts,
     EgocentricDiagnosticsArtifacts,
     FourpanelTripletArtifacts,
     LandmarkMetricDiagnosticsArtifacts,
@@ -17,6 +18,7 @@ from .store import (
 
 __all__ = [
     "ArtifactStore",
+    "BodyAngleReportArtifacts",
     "EgocentricDiagnosticsArtifacts",
     "FourpanelTripletArtifacts",
     "LandmarkMetricDiagnosticsArtifacts",

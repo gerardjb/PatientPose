@@ -83,6 +83,13 @@ class LandmarkMetricReportArtifacts:
     summary_csv: Path
 
 
+@dataclass(frozen=True)
+class BodyAngleReportArtifacts:
+    output_dir: Path
+    trace_csv: Path
+    summary_csv: Path
+
+
 class ArtifactStore:
     def __init__(self, paths: ProjectPaths) -> None:
         self.paths = paths
@@ -95,6 +102,7 @@ class ArtifactStore:
         (self.paths.results / "Diagnostics" / "egocentric").mkdir(parents=True, exist_ok=True)
         (self.paths.results / "Diagnostics" / "landmarks").mkdir(parents=True, exist_ok=True)
         (self.paths.results / "Reports" / "landmark_metrics").mkdir(parents=True, exist_ok=True)
+        (self.paths.results / "Reports" / "body_angle").mkdir(parents=True, exist_ok=True)
 
     def preprocess_video(self, video_path: Path) -> PreprocessVideoArtifacts:
         stem = video_path.stem
@@ -233,5 +241,19 @@ class ArtifactStore:
         return LandmarkMetricReportArtifacts(
             output_dir=output_dir,
             trace_csv=output_dir / f"{base}_traces.csv",
+            summary_csv=output_dir / f"{base}_summary.csv",
+        )
+
+    def body_angle_report(
+        self,
+        stem: str,
+        *,
+        space: str,
+    ) -> BodyAngleReportArtifacts:
+        output_dir = self.paths.results / "Reports" / "body_angle"
+        base = f"{stem}_{space}_body-angle"
+        return BodyAngleReportArtifacts(
+            output_dir=output_dir,
+            trace_csv=output_dir / f"{base}_trace.csv",
             summary_csv=output_dir / f"{base}_summary.csv",
         )

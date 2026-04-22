@@ -23,7 +23,15 @@ from patientpose.artifacts import ArtifactStore, PairReportArtifacts
 from patientpose.config import resolve_project_paths
 from patientpose.datasets import discover_pairs, discover_sessions, infer_camera_csv, parse_camera_role_specs
 from patientpose.landmarks import infer_pose_world_csv
-from patientpose.reporting import compute_landmark_metric_trace, export_landmark_metric_batch, metric_trace_table, summarize_landmark_metric_trace
+from patientpose.reporting import (
+    body_angle_trace_table,
+    compute_body_angle_trace,
+    compute_landmark_metric_trace,
+    export_landmark_metric_batch,
+    metric_trace_table,
+    summarize_body_angle_trace,
+    summarize_landmark_metric_trace,
+)
 
 
 def add_pair_report_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -66,6 +74,77 @@ def add_pair_report_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         type=float,
         default=None,
         help="Optional end time (s) to include in offset estimation/plots.",
+    )
+    return parser
+
+
+def add_body_angle_export_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="PatientPose repo root. Defaults to the nearest parent containing pyproject.toml.",
+    )
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
+        "--camera_csv",
+        type=Path,
+        default=None,
+        help="Direct path to the camera landmarks CSV to export.",
+    )
+    source_group.add_argument(
+        "--tag",
+        type=str,
+        default=None,
+        help="Resolved pair tag to export from.",
+    )
+    parser.add_argument(
+        "--camera-side",
+        choices=("A", "ND"),
+        default="ND",
+        help="Which camera side to use when resolving from --tag.",
+    )
+    parser.add_argument(
+        "--camera-role",
+        action="append",
+        default=None,
+        help="Session-mode camera mapping in the form CAMERA_ID=ROLE, where ROLE is A or ND.",
+    )
+    parser.add_argument(
+        "--space",
+        choices=("image", "world"),
+        default="image",
+        help="Which pose representation to analyze when computing body angle.",
+    )
+    parser.add_argument(
+        "--world_csv",
+        type=Path,
+        default=None,
+        help="Optional explicit path to the pose-world CSV. Defaults to the paired preprocess artifact.",
+    )
+    parser.add_argument(
+        "--visibility-threshold",
+        type=float,
+        default=0.4,
+        help="Visibility threshold applied before body-axis estimation.",
+    )
+    parser.add_argument(
+        "--smooth-window",
+        type=int,
+        default=7,
+        help="Centered smoothing window in frames for scale and body axes.",
+    )
+    parser.add_argument(
+        "--trace-output",
+        type=Path,
+        default=None,
+        help="Optional explicit output path for the long-form body-angle trace CSV.",
+    )
+    parser.add_argument(
+        "--summary-output",
+        type=Path,
+        default=None,
+        help="Optional explicit output path for the body-angle summary CSV.",
     )
     return parser
 
@@ -426,6 +505,50 @@ def run_landmark_metric_export(args: argparse.Namespace) -> None:
     summary_df.to_csv(summary_output, index=False)
     print(f"Wrote landmark metric trace CSV to {trace_output}")
     print(f"Wrote landmark metric summary CSV to {summary_output}")
+
+
+def run_body_angle_export(args: argparse.Namespace) -> None:
+    paths = resolve_project_paths(args.project_root)
+    artifact_store = ArtifactStore(paths)
+    artifact_store.ensure_standard_dirs()
+
+    camera_csv_path = _resolve_landmark_metric_camera_csv(
+        project_root=paths.root,
+        camera_csv=args.camera_csv,
+        tag=args.tag,
+        camera_side=args.camera_side,
+        camera_role_specs=args.camera_role,
+    )
+    try:
+        result = compute_body_angle_trace(
+            camera_csv_path,
+            space=args.space,
+            project_root=paths.root,
+            world_csv=_resolve_cli_path(args.world_csv, paths.root) if args.world_csv is not None else None,
+            visibility_threshold=args.visibility_threshold,
+            smooth_window=args.smooth_window,
+        )
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    artifacts = artifact_store.body_angle_report(
+        result.stem,
+        space=args.space,
+    )
+    trace_output = _resolve_cli_path(args.trace_output, paths.root) if args.trace_output is not None else artifacts.trace_csv
+    summary_output = (
+        _resolve_cli_path(args.summary_output, paths.root) if args.summary_output is not None else artifacts.summary_csv
+    )
+
+    trace_df = body_angle_trace_table(result)
+    summary_df = summarize_body_angle_trace(result)
+
+    trace_output.parent.mkdir(parents=True, exist_ok=True)
+    summary_output.parent.mkdir(parents=True, exist_ok=True)
+    trace_df.to_csv(trace_output, index=False)
+    summary_df.to_csv(summary_output, index=False)
+    print(f"Wrote body-angle trace CSV to {trace_output}")
+    print(f"Wrote body-angle summary CSV to {summary_output}")
 
 
 def run_landmark_metric_batch(args: argparse.Namespace) -> None:

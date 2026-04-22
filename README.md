@@ -138,7 +138,13 @@ python -m patientpose diagnose landmark-overlay-video \
     --handedness Right \
     --metric thumb-index-distance
   ```
+  ```bash
+  python -m patientpose report body-angle-export \
+    --camera_csv results/OutputCSVs/landmarks_20250408_fingerTap_decrement.csv \
+    --space image
+  ```
     - These write long-form trace and summary CSVs under `results/Reports/landmark_metrics/`.
+    - `body-angle-export` writes the same body-angle trace used by the egocentric diagnostics under `results/Reports/body_angle/`.
 - A labeling GUI for batching metadata entry lives at `scripts/video_labeling_gui.py`. It relies on the community-maintained `FreeSimpleGUI` package bundled with the project dependencies. Launch it from the `scripts` directory with:
 ```bash
 python video_labeling_gui.py

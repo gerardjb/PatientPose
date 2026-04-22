@@ -35,9 +35,11 @@ from patientpose.pipeline.rendering import (
     run_triplet_video,
 )
 from patientpose.pipeline.reporting import (
+    add_body_angle_export_args,
     add_landmark_metric_batch_args,
     add_landmark_metric_export_args,
     add_pair_report_args,
+    run_body_angle_export,
     run_landmark_metric_batch,
     run_landmark_metric_export,
     run_pair_report,
@@ -103,6 +105,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_pair_report_args(report_pair_parser)
     report_pair_parser.set_defaults(handler=run_pair_report)
+
+    report_body_angle_parser = report_subparsers.add_parser(
+        "body-angle-export",
+        help="Export the egocentric body-angle trace and summary CSVs for one camera CSV.",
+    )
+    add_body_angle_export_args(report_body_angle_parser)
+    report_body_angle_parser.set_defaults(handler=run_body_angle_export)
 
     report_landmark_export_parser = report_subparsers.add_parser(
         "landmark-metric-export",

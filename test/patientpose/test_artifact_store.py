@@ -51,6 +51,10 @@ def test_landmark_diagnostics_artifact_paths_are_stable():
         space="image",
         metric="thumb-index-distance",
     )
+    body_angle_artifacts = store.body_angle_report(
+        "fingertap",
+        space="image",
+    )
 
     assert trace_artifacts.output_dir == root / "results" / "Diagnostics" / "landmarks"
     assert trace_artifacts.output_plot == root / "results" / "Diagnostics" / "landmarks" / "fingertap_hand_image_x_y_traces.png"
@@ -60,3 +64,5 @@ def test_landmark_diagnostics_artifact_paths_are_stable():
     assert report_artifacts.summary_csv == root / "results" / "Reports" / "landmark_metrics" / "fingertap_hand_image_thumb-index-distance_summary.csv"
     assert batch_report_artifacts.trace_csv == root / "results" / "Reports" / "landmark_metrics" / "batch_hand_image_thumb-index-distance_traces.csv"
     assert batch_report_artifacts.summary_csv == root / "results" / "Reports" / "landmark_metrics" / "batch_hand_image_thumb-index-distance_summary.csv"
+    assert body_angle_artifacts.trace_csv == root / "results" / "Reports" / "body_angle" / "fingertap_image_body-angle_trace.csv"
+    assert body_angle_artifacts.summary_csv == root / "results" / "Reports" / "body_angle" / "fingertap_image_body-angle_summary.csv"
